@@ -65,8 +65,8 @@ Prospero is free and unencumbered software released into the public
 domain. See [UNLICENSE](UNLICENSE).
 
 Its programs include third-party code under its own licenses: Dear
-ImGui (MIT), FreeType (FTL), md4c (MIT), SDL3 (zlib), cpp-httplib
-(MIT), Mbed TLS (Apache-2.0), and Wuffs (Apache-2.0 or MIT, at your
-option), which every program with the engine includes.
+ImGui (MIT), FreeType (FTL), md4c (MIT), libvterm (MIT), SDL3 (zlib),
+cpp-httplib (MIT), Mbed TLS (Apache-2.0), and Wuffs (Apache-2.0 or
+MIT, at your option), which every program with the engine includes.
 
 [w64devkit]: https://github.com/skeeto/w64devkit

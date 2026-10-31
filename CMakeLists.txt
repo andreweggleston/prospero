@@ -153,10 +153,10 @@ if(PROSPERO_GUI)
 endif()
 
 if(WIN32 AND PROSPERO_GUI)
-  # The GUI build has CRT startup, since FreeType, md4c and ImGui need a
-  # CRT, though the core still never calls it. windows.h, D3D11 and the
-  # ImGui Win32 backends stay in the gui_win32.cpp edge, which embeds
-  # the icon and the manifest (assets/, through -Wa,-I).
+  # The GUI build has CRT startup, since FreeType, md4c, libvterm and
+  # ImGui need a CRT, though the core still never calls it. windows.h,
+  # D3D11 and the ImGui Win32 backends stay in the gui_win32.cpp edge,
+  # which embeds the icon and the manifest (assets/, through -Wa,-I).
   add_library(prospero_gui OBJECT src/gui_win32.cpp)
   set_property(SOURCE src/gui_win32.cpp APPEND PROPERTY OBJECT_DEPENDS
     ${PROJECT_SOURCE_DIR}/assets/prospero.ico
@@ -170,7 +170,7 @@ if(WIN32 AND PROSPERO_GUI)
   # in a translation unit of its own (src/deskwin32.cpp)
   add_executable(prospero WIN32 src/main_win32.cpp src/deskwin32.cpp)
   target_link_libraries(prospero PRIVATE
-    prospero_gui imgui md4c kernel32 advapi32 winhttp comdlg32 ole32
+    prospero_gui imgui md4c vterm kernel32 advapi32 winhttp comdlg32 ole32
     user32 gdi32
   )
   target_link_options(prospero PRIVATE -static -municode)
@@ -194,7 +194,7 @@ else()
   add_executable(prospero src/main_posix.cpp)
   target_link_libraries(prospero PRIVATE httpedge Threads::Threads)
   if(PROSPERO_GUI)
-    target_link_libraries(prospero PRIVATE imgui md4c)
+    target_link_libraries(prospero PRIVATE imgui md4c vterm)
   endif()
   # Every tool process starts under a reaper, this executable, so its
   # startup is on the critical path: loading libstdc++ dynamically costs
@@ -404,7 +404,7 @@ if(NOT CMAKE_CROSSCOMPILING)
   target_compile_definitions(prospero_test PRIVATE PROSPERO_ARENACHECK=1)
   if(PROSPERO_GUI)
     # The GUI's pure modules: scheduler, markdown, layout, view model.
-    target_link_libraries(prospero_test PRIVATE md4c)
+    target_link_libraries(prospero_test PRIVATE md4c vterm)
     target_compile_definitions(prospero_test PRIVATE PROSPERO_GUI=1)
   endif()
   if(PROSPERO_HAS_NOSTDLIBXX)

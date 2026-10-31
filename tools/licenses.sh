@@ -7,7 +7,8 @@
 #   tools/licenses.sh SRC OUT [gui]
 #
 # SRC is an unpacked source tarball (tools/dist.py), with deps/. With
-# gui, also the GUI's: SDL3, FreeType, Dear ImGui, md4c, and the fonts.
+# gui, also the GUI's: SDL3, FreeType, Dear ImGui, md4c, libvterm, and
+# the fonts.
 # A missing file is an error.
 set -eu
 src=$1
@@ -34,5 +35,6 @@ if [ "$gui" = gui ]; then
         >"$out/freetype.txt"
     cp "$src/deps/imgui/LICENSE.txt" "$out/imgui.txt"
     cp "$src/deps/md4c/LICENSE.md" "$out/md4c.txt"
+    cp "$src/deps/libvterm/LICENSE" "$out/libvterm.txt"
     cp "$src/assets/FONTS" "$out/fonts.txt"
 fi

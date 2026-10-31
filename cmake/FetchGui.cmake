@@ -5,8 +5,9 @@
 #   md4c      v0.6.0
 #   freetype  2.15.0
 #   SDL3      3.4.18 (macOS and Linux only)
+#   libvterm  0.3.3
 #
-# Targets: md4c, freetype, imgui (with its platform backends and the
+# Targets: md4c, vterm, freetype, imgui (with its platform backends and the
 # FreeType loader), and SDL3::SDL3-static on POSIX. Third-party code
 # keeps its own flags; consumers see its headers as system headers, so
 # the core's warnings stay quiet about them.
@@ -38,11 +39,29 @@ FetchContent_Declare(freetype
   SYSTEM
 )
 
-FetchContent_MakeAvailable(imgui md4c)
+# The terminal pane's emulator. Its release tarball carries the tables
+# its Makefile would generate (src/encoding/*.inc, src/fullwidth.inc).
+fetch_content_bundled(libvterm libvterm)
+FetchContent_Declare(libvterm
+  URL https://launchpad.net/libvterm/trunk/v0.3/+download/libvterm-0.3.3.tar.gz
+  URL_HASH SHA256=09156f43dd2128bd347cbeebe50d9a571d32c64e0cf18d211197946aff7226e0
+  SOURCE_SUBDIR _none  # no CMake project: its sources are listed below
+)
+
+FetchContent_MakeAvailable(imgui md4c libvterm)
 
 add_library(md4c STATIC ${md4c_SOURCE_DIR}/src/md4c.c)
 target_include_directories(md4c SYSTEM PUBLIC ${md4c_SOURCE_DIR}/src)
 target_compile_definitions(md4c PUBLIC MD4C_USE_UTF8)
+
+set(VTERM ${libvterm_SOURCE_DIR}/src)
+add_library(vterm STATIC
+  ${VTERM}/encoding.c ${VTERM}/keyboard.c ${VTERM}/mouse.c
+  ${VTERM}/parser.c   ${VTERM}/pen.c      ${VTERM}/screen.c
+  ${VTERM}/state.c    ${VTERM}/unicode.c  ${VTERM}/vterm.c
+)
+target_include_directories(vterm SYSTEM PUBLIC ${libvterm_SOURCE_DIR}/include)
+target_include_directories(vterm PRIVATE ${VTERM})
 
 # FreeType without optional codecs: the fonts are embedded TrueType.
 set(FT_DISABLE_ZLIB     ON CACHE BOOL "" FORCE)
