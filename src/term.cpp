@@ -9,8 +9,13 @@
 // stay symbolic, the default or an index into the 256-color palette, or
 // else red, green and blue (TermColor); termrgb resolves them against
 // the theme's 16 colors, so a change of theme recolors what is already
-// on the screen. Scrollback keeps each cell's first character only,
-// none that combine with it.
+// on the screen. A cell holds a character and up to five more that
+// combine with it (accents, variation selectors, a joiner), on the
+// screen and in the scrollback alike. Which combine is libvterm's call,
+// by code point, and like wcwidth's, so the cursor stays where programs
+// count it: an emoji's skin tone, or the next emoji after a joiner, is a
+// cell of its own, as many terminals lay them out (and as the pane, with
+// no shaping, could only draw them).
 //
 // Keys go out as a terminal would send them to a shell, xterm's way:
 // libvterm's own encoding, except that Ctrl with a character, and Enter,
@@ -18,7 +23,8 @@
 // bytes rather than CSI u, which shells do not read. termmods turns the
 // modifiers ImGui reports into the terminal's: on macOS ImGui reports
 // Cmd as Ctrl and the Control key as Super, and Option is Meta only if
-// asked (else it types its characters).
+// asked; else it types its characters, and on the arrows and the
+// deleting keys moves and deletes by word, as Terminal and iTerm do.
 //
 // libvterm allocates for itself, with malloc, as does the scrollback:
 // a terminal lives as long as its session's, not a frame's or the
@@ -27,9 +33,10 @@
 // This is free and unencumbered software released into the public domain.
 
 enum : i32 {
-    TERM_SHIFT = VTERM_MOD_SHIFT,
-    TERM_ALT   = VTERM_MOD_ALT,
-    TERM_CTRL  = VTERM_MOD_CTRL,
+    TERM_SHIFT  = VTERM_MOD_SHIFT,
+    TERM_ALT    = VTERM_MOD_ALT,
+    TERM_CTRL   = VTERM_MOD_CTRL,
+    TERM_OPTION = 8,  // macOS's Option, not as Meta: words, on a few keys
 };
 
 // A cell's color: TERM_DEFAULT (the foreground's or the background's,
@@ -55,17 +62,35 @@ enum : i32 {
     TERM_CURSOR_BAR = VTERM_PROP_CURSORSHAPE_BAR_LEFT,
 };
 
+enum : i32 {
+    TERM_MAXCHARS = VTERM_MAX_CHARS_PER_CELL,  // a character and five combining
+};
+
 struct TermCell {
-    u32 ch;     // the first code point, 0 for none (blank or a wide one's right half)
-    u32 fg;     // TermColor
+    u32 ch[TERM_MAXCHARS];  // a character, then those that combine with it,
+                            // ended by 0 if fewer; ch[0] 0 for none (blank,
+                            // or a wide one's right half)
+    u32 fg;                 // TermColor
     u32 bg;
-    u8  attrs;  // TERM_BOLD...
-    u8  width;  // 1, 2 for a wide character, 0 for its right half
+    u8  attrs;              // TERM_BOLD...
+    u8  width;              // 1, 2 for a wide character, 0 for its right half
+};
+
+// A cell as the scrollback keeps it, 16 bytes: the first character, and
+// how many more combine with it, at more in its line's pool.
+struct TermSbCell {
+    u32 ch;
+    u32 fg;
+    u32 bg;
+    u8  attrs;
+    u8  shape;  // width | (characters that combine)<<2
+    unsigned short more;  // where those start in the line's pool
 };
 
 struct TermLine {
-    TermCell *cells;
-    i32       cols;  // trailing blanks dropped
+    TermSbCell *cells;  // with the pool after them, in one allocation
+    u32        *pool;
+    i32         cols;   // trailing blanks dropped
 };
 
 struct Term {
@@ -163,7 +188,11 @@ static TermCell termfromvterm(VTermScreenCell const *v)
 {
     TermCell c = {};
     u32 ch = v->chars[0];
-    c.ch    = ch==(u32)-1 ? 0 : ch;
+    if (ch != (u32)-1) {
+        for (i32 i = 0; i<TERM_MAXCHARS && v->chars[i]; i++) {
+            c.ch[i] = v->chars[i];
+        }
+    }
     c.width = ch==(u32)-1 ? 0 : (u8)v->width;
     c.fg    = termcolor(v->fg, 1);
     c.bg    = termcolor(v->bg, 0);
@@ -180,7 +209,10 @@ static TermCell termfromvterm(VTermScreenCell const *v)
 static VTermScreenCell termtovterm(TermCell c)
 {
     VTermScreenCell v = {};
-    v.chars[0]          = c.width ? c.ch : (u32)-1;
+    for (i32 i = 0; i < TERM_MAXCHARS; i++) {
+        v.chars[i] = c.ch[i];
+    }
+    v.chars[0]          = c.width ? c.ch[0] : (u32)-1;
     v.width             = (char)(c.width ? c.width : 1);
     v.fg                = vtermcolor(c.fg, 1);
     v.bg                = vtermcolor(c.bg, 0);
@@ -196,19 +228,44 @@ static VTermScreenCell termtovterm(TermCell c)
 
 static b32 termblank(TermCell c)
 {
-    return !c.ch && c.width==1 && c.bg==TERM_DEFAULT && !(c.attrs & TERM_REVERSE);
+    return !c.ch[0] && c.width==1 && c.bg==TERM_DEFAULT && !(c.attrs & TERM_REVERSE);
+}
+
+// How many characters a cell holds, the first one's among them.
+static i32 termnchars(TermCell const *c)
+{
+    i32 n = 0;
+    while (n<TERM_MAXCHARS && c->ch[n]) {
+        n++;
+    }
+    return n;
+}
+
+static TermCell termfromsb(TermLine *l, i32 col)
+{
+    TermSbCell s = l->cells[col];
+    TermCell   c = {};
+    c.ch[0] = s.ch;
+    for (i32 i = 0; i < s.shape>>2; i++) {
+        c.ch[1+i] = l->pool[s.more + i];
+    }
+    c.fg    = s.fg;
+    c.bg    = s.bg;
+    c.attrs = s.attrs;
+    c.width = s.shape & 3;
+    return c;
 }
 
 // The cell at row (negative: scrollback) and col: blank past a line's
 // end, or out of range.
 static TermCell termcell(Term *t, i32 row, i32 col)
 {
-    TermCell blank = {0, TERM_DEFAULT, TERM_DEFAULT, 0, 1};
+    TermCell blank = {{}, TERM_DEFAULT, TERM_DEFAULT, 0, 1};
     if (col<0 || col>=t->cols || row>=t->rows || row<-t->sblen) {
         return blank;
     } else if (row < 0) {
         TermLine *l = &t->sb[((t->sbhead + row) % t->sbmax + t->sbmax) % t->sbmax];
-        return col<l->cols ? l->cells[col] : blank;
+        return col<l->cols ? termfromsb(l, col) : blank;
     }
     VTermScreenCell v;
     VTermPos        p = {row, col};
@@ -229,9 +286,13 @@ static Str termrowtext(Term *t, Arena *a, i32 row)
             continue;
         }
         u8 enc[4];
-        iz n = utf8encode(enc, c.ch ? (i32)c.ch : ' ');
-        print(&b, Str{enc, n});
-        keep = c.ch && c.ch!=' ' ? b.len : keep;
+        if (!c.ch[0]) {
+            print(&b, " ");
+        }
+        for (i32 i = 0; i < termnchars(&c); i++) {
+            print(&b, Str{enc, utf8encode(enc, (i32)c.ch[i])});
+        }
+        keep = c.ch[0] && c.ch[0]!=' ' ? b.len : keep;
     }
     b.len = keep;
     return finish(&b);
@@ -243,8 +304,7 @@ static Str termrowtext(Term *t, Arena *a, i32 row)
 static void termsbfree(TermLine *l)
 {
     free(l->cells);
-    l->cells = 0;
-    l->cols  = 0;
+    *l = {};
 }
 
 static int termdamage(VTermRect, void *user)
@@ -332,12 +392,29 @@ static int termpushline(int cols, VTermScreenCell const *cells, void *user)
     }
     TermLine l = {};
     if (keep) {
-        l.cells = (TermCell *)malloc(sizeof(TermCell)*(uz)keep);
+        // The characters that combine go to the pool, as far as a u16
+        // reaches, which a line would pass only past 13,000 columns
+        iz extra = 0;
+        for (i32 i = 0; i < keep; i++) {
+            TermCell c = termfromvterm(&cells[i]);
+            extra += termnchars(&c) - (c.ch[0] ? 1 : 0);
+        }
+        extra = extra>0xffff ? 0xffff : extra;
+        l.cells = (TermSbCell *)malloc(sizeof(TermSbCell)*(uz)keep + sizeof(u32)*(uz)extra);
         if (!l.cells) {
             return 0;  // the line is lost
         }
+        l.pool = (u32 *)(l.cells + keep);
+        iz used = 0;
         for (i32 i = 0; i < keep; i++) {
-            l.cells[i] = termfromvterm(&cells[i]);
+            TermCell c = termfromvterm(&cells[i]);
+            i32      n = c.ch[0] ? termnchars(&c) - 1 : 0;
+            n = used+n>extra ? 0 : n;
+            for (i32 j = 0; j < n; j++) {
+                l.pool[used + j] = c.ch[1+j];
+            }
+            l.cells[i] = {c.ch[0], c.fg, c.bg, c.attrs, (u8)(c.width | n<<2), (unsigned short)used};
+            used += n;
         }
         l.cols = keep;
     }
@@ -359,9 +436,9 @@ static int termpopline(int cols, VTermScreenCell *cells, void *user)
     t->sbhead = (t->sbhead - 1 + t->sbmax) % t->sbmax;
     t->sblen--;
     TermLine *l     = &t->sb[t->sbhead];
-    TermCell  blank = {0, TERM_DEFAULT, TERM_DEFAULT, 0, 1};
+    TermCell  blank = {{}, TERM_DEFAULT, TERM_DEFAULT, 0, 1};
     for (i32 i = 0; i < cols; i++) {
-        cells[i] = termtovterm(i<l->cols ? l->cells[i] : blank);
+        cells[i] = termtovterm(i<l->cols ? termfromsb(l, i) : blank);
     }
     termsbfree(l);
     t->dirty = 1;
@@ -540,9 +617,24 @@ static void termchar(Term *t, u32 c, i32 mods)
 // A key that is not a character (VTermKey): arrows, Home and End, the
 // function keys, Enter, Tab, Backspace, Escape. These last four ignore
 // Shift and Ctrl, as xterm does, but for Shift+Tab (CSI Z) and
-// Ctrl+Backspace (^H).
+// Ctrl+Backspace (^H). macOS's Option, when not Meta, makes Left and
+// Right a word back and forward (ESC b, ESC f) and Backspace and Delete
+// delete a word (ESC DEL, ESC d), as readline and zle read them, and
+// changes no other key.
 static void termkey(Term *t, i32 key, i32 mods)
 {
+    if (mods & TERM_OPTION) {
+        mods &= ~TERM_OPTION;
+        u8 word = key==VTERM_KEY_LEFT      ? 'b'  :
+                  key==VTERM_KEY_RIGHT     ? 'f'  :
+                  key==VTERM_KEY_BACKSPACE ? 0x7f :
+                  key==VTERM_KEY_DEL       ? 'd'  : 0;
+        if (word && !(mods & (TERM_CTRL|TERM_ALT))) {
+            u8 b[2] = {0x1b, word};
+            termsend(t, {b, 2});
+            return;
+        }
+    }
     switch (key) {
     case VTERM_KEY_BACKSPACE:
         if (mods & TERM_CTRL) {
@@ -593,9 +685,10 @@ static b32 termwantsmouse(Term *t)
 // the wheel) pressed or released, for a program that hears it.
 static void termmouse(Term *t, i32 row, i32 col, i32 button, b32 pressed, i32 mods)
 {
-    vterm_mouse_move(t->vt, row, col, (VTermModifier)mods);
+    VTermModifier m = (VTermModifier)(mods & VTERM_ALL_MODS_MASK);
+    vterm_mouse_move(t->vt, row, col, m);
     if (button) {
-        vterm_mouse_button(t->vt, button, pressed, (VTermModifier)mods);
+        vterm_mouse_button(t->vt, button, pressed, m);
     }
 }
 
@@ -613,7 +706,8 @@ static void termfocus(Term *t, b32 in)
 // The modifiers ImGui reports held, as the terminal's (TERM_*), or -1
 // if the chord is Prospero's (Cmd on macOS). On macOS ImGui reports Cmd
 // as ctrl and the Control key as super, and Option is Alt only as Meta
-// (optionmeta): otherwise it types its characters, which arrive as text.
+// (optionmeta): otherwise it types its characters, which arrive as text,
+// and is TERM_OPTION for termkey's words.
 static i32 termmods(b32 ctrl, b32 shift, b32 alt, b32 super, b32 mac, b32 optionmeta)
 {
     i32 m = shift ? TERM_SHIFT : 0;
@@ -622,7 +716,7 @@ static i32 termmods(b32 ctrl, b32 shift, b32 alt, b32 super, b32 mac, b32 option
             return -1;
         }
         m |= super ? TERM_CTRL : 0;
-        m |= alt && optionmeta ? TERM_ALT : 0;
+        m |= alt ? optionmeta ? TERM_ALT : TERM_OPTION : 0;
     } else {
         m |= ctrl ? TERM_CTRL : 0;
         m |= alt  ? TERM_ALT  : 0;

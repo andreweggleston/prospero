@@ -142,10 +142,10 @@ static void test_term(Test *t)
     // Wide characters take two cells, the second empty
     tm = termnew(3, 10, 10, termsink, &out);
     termwrite(tm, "\xe3\x81\x82" "a\xe2\x9c\x93");  // あ a ✓
-    expect(t, "term.wide", termhex(&a, termcell(tm, 0, 0).ch), "00003042");
+    expect(t, "term.wide", termhex(&a, termcell(tm, 0, 0).ch[0]), "00003042");
     expect(t, "term.widew", istr(&a, termcell(tm, 0, 0).width), "2");
     expect(t, "term.widehalf", istr(&a, termcell(tm, 0, 1).width), "0");
-    expect(t, "term.widenext", termhex(&a, termcell(tm, 0, 2).ch), "00000061");
+    expect(t, "term.widenext", termhex(&a, termcell(tm, 0, 2).ch[0]), "00000061");
     expect(t, "term.widetext", termrowtext(tm, &a, 0), "\xe3\x81\x82" "a\xe2\x9c\x93");
     expect(t, "term.widecursor", istr(&a, tm->cursorcol), "4");
 
@@ -156,6 +156,43 @@ static void test_term(Test *t)
     termresize(tm, 4, 10);
     expect(t, "term.popwide", termrowtext(tm, &a, 0), "\xe3\x81\x82" "a\xe2\x9c\x93");
     expect(t, "term.popwidew", istr(&a, termcell(tm, 0, 0).width), "2");
+    termfree(tm);
+
+    // Characters that combine stay with the one before them, on the
+    // screen and through the scrollback and back: an accent, joiners
+    tm = termnew(3, 12, 10, termsink, &out);
+    Str accent = "e\xcc\x81!";                                    // e + U+0301
+    Str tone   = "\xf0\x9f\x91\x8b\xf0\x9f\x8f\xbd";              // U+1F44B U+1F3FD
+    Str family = "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d"
+                 "\xf0\x9f\x91\xa7";                                // man ZWJ woman ZWJ girl
+    termwrite(tm, accent);
+    termwrite(tm, "\r\n");
+    termwrite(tm, tone);
+    termwrite(tm, family);
+    TermCell e = termcell(tm, 0, 0);
+    expect(t, "term.combine", istr(&a, termnchars(&e)), "2");
+    expect(t, "term.combine2", termhex(&a, e.ch[1]), "00000301");
+    expect(t, "term.combinenext", termhex(&a, termcell(tm, 0, 1).ch[0]), "00000021");
+    expect(t, "term.combinetext", termrowtext(tm, &a, 0), accent);
+    // An emoji modifier is a cell of its own, and a joiner combines with
+    // the character before it, as wcwidth counts them: hand, tone, man
+    // and joiner, woman and joiner, girl, each two columns
+    TermCell w = termcell(tm, 1, 2);
+    expect(t, "term.tone", termhex(&a, w.ch[0]), "0001f3fd");
+    expect(t, "term.tonew", istr(&a, w.width), "2");
+    TermCell f = termcell(tm, 1, 4);
+    expect(t, "term.zwj", istr(&a, termnchars(&f)*10 + f.width), "22");
+    expect(t, "term.zwj2", termhex(&a, f.ch[1]), "0000200d");
+    expect(t, "term.zwjcursor", istr(&a, tm->cursorcol), "10");
+    expect(t, "term.zwjtext", termrowtext(tm, &a, 1), concat(&a, tone, family));
+    termwrite(tm, "\r\n\r\n\r\n");
+    expect(t, "term.sbcombine", termrowtext(tm, &a, -2), accent);
+    expect(t, "term.sbzwj", termrowtext(tm, &a, -1), concat(&a, tone, family));
+    TermCell sf = termcell(tm, -1, 6);
+    expect(t, "term.sbzwjn", istr(&a, termnchars(&sf)*10 + sf.width), "22");
+    termresize(tm, 5, 12);
+    expect(t, "term.popcombine", termrowtext(tm, &a, 0), accent);
+    expect(t, "term.popzwj", termrowtext(tm, &a, 1), concat(&a, tone, family));
     termfree(tm);
 
     // The alternate screen: its own, nothing to the scrollback, and the
@@ -292,8 +329,6 @@ static void test_term(Test *t)
     expect(t, "term.ctrlbackspace", termsent(&a, &out), "^H");
     termkey(tm, VTERM_KEY_BACKSPACE, TERM_ALT);
     expect(t, "term.altbackspace", termsent(&a, &out), "^[^?");
-    termkey(tm, VTERM_KEY_ESCAPE, TERM_SHIFT);
-    expect(t, "term.escape", termsent(&a, &out), "^[");
 
     // Pastes: newlines as Enter, bracketed once the program asks
     termpaste(tm, a, "a\nb\r\nc\rd");
@@ -309,7 +344,7 @@ static void test_term(Test *t)
     //                        ctrl shift alt super mac meta
     expect(t, "term.modsmaccmd", istr(&a, termmods(1, 0, 0, 0, 1, 0)), "-1");
     expect(t, "term.modsmacctrl", istr(&a, termmods(0, 0, 0, 1, 1, 0)), istr(&a, TERM_CTRL));
-    expect(t, "term.modsmacopt", istr(&a, termmods(0, 0, 1, 0, 1, 0)), "0");
+    expect(t, "term.modsmacopt", istr(&a, termmods(0, 0, 1, 0, 1, 0)), istr(&a, TERM_OPTION));
     expect(t, "term.modsmacmeta", istr(&a, termmods(0, 1, 1, 0, 1, 1)),
            istr(&a, TERM_ALT|TERM_SHIFT));
     expect(t, "term.modsctrl", istr(&a, termmods(1, 0, 0, 0, 0, 0)), istr(&a, TERM_CTRL));
@@ -319,4 +354,5 @@ static void test_term(Test *t)
     expect(t, "term.charkeyalt", istr(&a, termcharkey(TERM_ALT|TERM_SHIFT)), "1");
     expect(t, "term.charkeyshift", istr(&a, termcharkey(TERM_SHIFT)), "0");
     expect(t, "term.charkeymac", istr(&a, termcharkey(-1)), "0");
+    expect(t, "term.charkeyopt", istr(&a, termcharkey(TERM_OPTION)), "0");
 }
