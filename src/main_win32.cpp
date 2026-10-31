@@ -39,6 +39,7 @@ enum : i32 {
     ERROR_ALREADY_EXISTS              = 183,
     ERROR_BAD_NETPATH                 = 53,
     ERROR_BAD_PATHNAME                = 161,
+    ERROR_CALL_NOT_IMPLEMENTED        = 120,
     ERROR_FILE_NOT_FOUND              = 2,
     ERROR_INVALID_DRIVE               = 15,
     ERROR_INVALID_NAME                = 123,
@@ -1935,6 +1936,18 @@ static Proc *os_spawn(Os *os, Spawn *sp, Arena scratch)
 static Proc *os_spawnio(Os *os, Spawn *sp, Arena scratch)
 {
     return spawnproc(os, sp, scratch, 1);
+}
+
+// No pseudo-console yet (ConPTY, Windows 10 1809 and later)
+static Proc *os_spawnpty(Os *, Spawn *, i32, i32, Arena)
+{
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return 0;
+}
+
+static b32 os_ptyresize(Os *, Proc *, i32, i32)
+{
+    return 0;
 }
 
 static b32 os_procwrite(Os *, Proc *p, Str data)

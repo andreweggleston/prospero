@@ -275,6 +275,19 @@ static Proc   *os_spawnio(Os *, Spawn *, Arena scratch);
 // os_procfree. Returns 0 if the input is closed or broken (the child
 // stopped reading), or too much is queued already.
 static b32     os_procwrite(Os *, Proc *, Str);
+// A child on a pseudo-terminal of rows by cols, its controlling terminal
+// (a terminal pane's shell, or ssh -t), set up like os_spawnio: what it
+// writes to the terminal arrives as PROC_DATA records, which wait for
+// room in the mailbox and are never dropped, and os_procwrite types into
+// it. outpath and maxbytes are unused. When the child exits, whatever it
+// left running gets a hangup and TERM, then 2 s later is killed, and the
+// output ends, with PROC_EOF. os_kill soft hangs up (SIGHUP to the child,
+// as closing a terminal window sends); hard as ever. POSIX only:
+// elsewhere null, as on failure, explained by os_lasterr.
+static Proc   *os_spawnpty(Os *, Spawn *, i32 rows, i32 cols, Arena scratch);
+// Set its terminal's size, which signals SIGWINCH to what runs in it.
+// Returns 0 if not a terminal's, or on failure.
+static b32     os_ptyresize(Os *, Proc *, i32 rows, i32 cols);
 // A program started apart from this one, to outlive it, as a terminal
 // window is: neither waited for nor killed with it, its output nowhere,
 // in its own session (POSIX) or console (Windows). argv[0] is found on

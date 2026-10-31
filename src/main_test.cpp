@@ -464,6 +464,8 @@ static Slice<Str> os_environ(Os *, Arena *) { return {}; }
 static iz    os_stdin(Os *, u8 *, iz) { return 0; }
 static Proc *os_spawn(Os *, Spawn *, Arena) { return 0; }
 static Proc *os_spawnio(Os *, Spawn *, Arena) { return 0; }
+static Proc *os_spawnpty(Os *, Spawn *, i32, i32, Arena) { return 0; }
+static b32   os_ptyresize(Os *, Proc *, i32, i32) { return 0; }
 static b32 os_launch(Os *, Arena, Slice<Str>, Str, Slice<Str>) { return 0; }
 static b32   os_procwrite(Os *, Proc *, Str) { return 0; }
 static void  os_kill(Os *, Proc *, b32) {}

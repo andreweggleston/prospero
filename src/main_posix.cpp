@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>  // strerror_r
 #include <sys/file.h>  // flock
+#include <sys/ioctl.h>  // TIOCSWINSZ, TIOCSCTTY
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/socket.h>
@@ -32,6 +33,7 @@
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __APPLE__
@@ -1103,6 +1105,10 @@ static Str os_lasterr(Os *, Arena *a)
 // the lifeline reads EOF and each reaper ends its tree, TERM and then
 // KILL 2 s later.
 //
+// A child from os_spawnpty starts under "prospero --reap-tty" instead,
+// with a terminal's slave on fds 0-2, which the reaper makes its
+// session's controlling terminal (see reap).
+//
 // A hard kill (os_kill) asks the reaper, with SIGUSR1, to sweep: it
 // kills every process it can find that came from the tool, round after
 // round until none is left, then its group with itself in it. That
@@ -1187,6 +1193,9 @@ struct Proc {
     iz         queued;    // under lock: bytes in the queue
     b32        closing;   // under lock: close the input after the queue
     b32        broken;    // under lock: the input is closed
+    // os_spawnpty
+    b32        tty;
+    i32        ptyfd;     // the master, for os_ptyresize, closed with the Proc
     u8         tail[PROC_TAILMAX];
     u8         msg[8+PROC_TAILMAX];
     u8         buf[PROC_BUFLEN];
@@ -1195,6 +1204,9 @@ struct Proc {
 static void procrelease(Proc *p)
 {
     if (!__atomic_sub_fetch(&p->refs, 1, __ATOMIC_ACQ_REL)) {
+        if (p->tty) {
+            close(p->ptyfd);
+        }
         pthread_mutex_destroy((pthread_mutex_t *)p->lock.opaque);
         free(p);
     }
@@ -1423,9 +1435,10 @@ static void closeall(i32 *fds, iz n)
 // block every signal. Handlers reset on exec by themselves, and only
 // ignored signals carry over, so only those need SETSIGDEF: none for a
 // reaper, which sets up its own, and for a tool the four its reaper
-// ignores. Restoring every signal costs a sigaction call each in the
-// child, a noticeable part of a spawn on a slow machine.
-static void childsignals(posix_spawnattr_t *attr, short flags, b32 tool)
+// ignores, and on a terminal (tty) the three of job control it ignores
+// too. Restoring every signal costs a sigaction call each in the child,
+// a noticeable part of a spawn on a slow machine.
+static void childsignals(posix_spawnattr_t *attr, short flags, b32 tool, b32 tty = 0)
 {
     sigset_t none, ignored;
     sigemptyset(&none);
@@ -1434,6 +1447,11 @@ static void childsignals(posix_spawnattr_t *attr, short flags, b32 tool)
     sigaddset(&ignored, SIGINT);
     sigaddset(&ignored, SIGHUP);
     sigaddset(&ignored, SIGPIPE);
+    if (tty) {
+        sigaddset(&ignored, SIGTSTP);
+        sigaddset(&ignored, SIGTTIN);
+        sigaddset(&ignored, SIGTTOU);
+    }
     posix_spawnattr_init(attr);
     posix_spawnattr_setsigmask(attr, &none);
     flags |= POSIX_SPAWN_SETSIGMASK;
@@ -1497,37 +1515,103 @@ static b32 sameexe(Os *os)
            now.ctime==os->exeid.ctime;
 }
 
-// Spawn under a reaper. With io, input is a pipe from the writer
-// thread, errors go to outpath (or /dev/null) directly, and the reader
-// passes output on as records instead of into the file. On macOS the
-// reaper is spawned disclaimed, its tool's responsible process, only
-// while that changes nothing privacy grants answer to (reapdisclaim).
-static Proc *spawnproc(Os *os, Spawn *sp, Arena scratch, b32 io)
+// A pseudo-terminal of rows by cols, both ends close-on-exec, neither
+// anyone's controlling terminal yet: the slave returned and the master
+// in *master, or -1 and errno. Line editing knows UTF-8 where it can.
+static i32 ptyopen(i32 *master, i32 rows, i32 cols)
 {
+    #ifdef __linux__
+    i32 m = posix_openpt(O_RDWR|O_NOCTTY|O_CLOEXEC);
+    #else
+    i32 m = posix_openpt(O_RDWR|O_NOCTTY);  // spawns here never inherit it
+    if (m >= 0) {
+        fcntl(m, F_SETFD, FD_CLOEXEC);
+    }
+    #endif
+    if (m < 0) {
+        return -1;
+    }
+    char name[128] = {};  // TIOCPTYGNAME's size
+    b32  ok        = !grantpt(m) && !unlockpt(m);
+    #ifdef __APPLE__
+    ok = ok && !ioctl(m, TIOCPTYGNAME, name);
+    #else
+    ok = ok && !ptsname_r(m, name, sizeof(name));  // ptsname is not thread-safe
+    #endif
+    i32 s = ok ? open(name, O_RDWR|O_NOCTTY|O_CLOEXEC) : -1;
+    if (s < 0) {
+        i32 save = errno;
+        close(m);
+        errno = save;
+        return -1;
+    }
+    struct winsize ws = {};
+    ws.ws_row = (unsigned short)(rows<1 ? 24 : rows>0xffff ? 0xffff : rows);
+    ws.ws_col = (unsigned short)(cols<1 ? 80 : cols>0xffff ? 0xffff : cols);
+    ioctl(m, TIOCSWINSZ, &ws);
+    #ifdef IUTF8
+    struct termios t;
+    if (!tcgetattr(s, &t)) {
+        t.c_iflag |= IUTF8;
+        tcsetattr(s, TCSANOW, &t);
+    }
+    #endif
+    *master = m;
+    return s;
+}
+
+enum {
+    SPAWN_FILE,  // os_spawn
+    SPAWN_PIPE,  // os_spawnio
+    SPAWN_PTY,   // os_spawnpty
+};
+
+// Spawn under a reaper. With a pipe (io), input is a pipe from the
+// writer thread, errors go to outpath (or /dev/null) directly, and the
+// reader passes output on as records instead of into the file. With a
+// pty, the same, but the terminal's slave is the tool's input, output
+// and errors, and its controlling terminal (reap --reap-tty), while
+// the master is both pipes' ends here, each its own descriptor, and a
+// third for resizing. On macOS the reaper is spawned disclaimed, its
+// tool's responsible process, only while that changes nothing privacy
+// grants answer to (reapdisclaim).
+static Proc *spawnproc(Os *os, Spawn *sp, Arena scratch, i32 mode,
+                       i32 rows = 0, i32 cols = 0)
+{
+    b32 io  = mode != SPAWN_FILE;
+    b32 tty = mode == SPAWN_PTY;
     if (!sp->argv.len || hasnul(sp->cwd) || hasnul(sp->outpath)) {
         errno = EINVAL;
         return 0;
     }
 
     // Child-side descriptors: input (null, or a pipe's read end), output
-    // write end, errors (the same, or the file), status write end
+    // write end, errors (the same, or the file), status write end; for a
+    // pty, the slave as all three
     i32   in[2]  = {-1, -1};
     i32   out[2] = {-1, -1};
     i32   st[2]  = {-1, -1};
+    i32   ptyfd  = -1;
     Event wake   = {{-1, -1}};
     i32   null   = open("/dev/null", O_RDWR|O_CLOEXEC);
     i32   file   = -1;
     b32   ok     = null >= 0;
-    if (ok && (!io || sp->outpath.len)) {
+    if (ok && (!io || (!tty && sp->outpath.len))) {
         file = open(cstr(&scratch, sp->outpath),
                     O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644);
         ok   = file >= 0;
     }
-    ok = ok && cloexecpipe(out) && cloexecpipe(st) &&
-         (!io || (cloexecpipe(in) && os_eventinit(&wake)));
+    if (tty) {
+        ok = ok && (out[1] = ptyopen(&out[0], rows, cols)) >= 0 &&
+             (in[1] = fcntl(out[0], F_DUPFD_CLOEXEC, 0)) >= 0 &&
+             (ptyfd = fcntl(out[0], F_DUPFD_CLOEXEC, 0)) >= 0;
+    } else {
+        ok = ok && cloexecpipe(out) && (!io || cloexecpipe(in));
+    }
+    ok = ok && cloexecpipe(st) && (!io || os_eventinit(&wake));
     if (!ok) {
         i32 save = errno;
-        i32 fds[] = {null, file, in[0], in[1], out[0], out[1], st[0], st[1]};
+        i32 fds[] = {null, file, in[0], in[1], out[0], out[1], st[0], st[1], ptyfd};
         closeall(fds, countof(fds));
         errno = save;
         return 0;
@@ -1539,15 +1623,16 @@ static Proc *spawnproc(Os *os, Spawn *sp, Arena scratch, b32 io)
         in[0] = highfd(in[0]);
         file  = highfd(file);
     }
-    i32 fd0 = io ? in[0] : null;
-    i32 fd2 = !io ? out[1] : sp->outpath.len ? file : null;
+    i32 fd0 = tty ? out[1] : io ? in[0] : null;
+    i32 fd2 = !io || tty ? out[1] : sp->outpath.len ? file : null;
     b32 disclaim = os->resp.disclaim &&
                    reapdisclaim(getpid(), os->respself, sameexe(os));
 
     iz     argc = 3 + sp->argv.len;
     char **argv = alloc<char *>(&scratch, argc+1);
     argv[0] = os->exe;
-    argv[1] = disclaim ? (char *)"--reap-disclaimed" : (char *)"--reap";
+    argv[1] = tty      ? disclaim ? (char *)"--reap-tty-disclaimed" : (char *)"--reap-tty"
+            : disclaim ? (char *)"--reap-disclaimed" : (char *)"--reap";
     argv[2] = cstr(&scratch, sp->cwd);
     for (iz i = 0; i < sp->argv.len; i++) {
         argv[3+i] = cstr(&scratch, sp->argv[i]);
@@ -1581,7 +1666,7 @@ static Proc *spawnproc(Os *os, Spawn *sp, Arena scratch, b32 io)
     i32 child[] = {null, out[1], st[1], in[0], io ? file : -1};
     closeall(child, countof(child));
     file = io ? -1 : file;
-    i32 mine[] = {file, out[0], st[0], in[1], (i32)wake.h[0], (i32)wake.h[1]};
+    i32 mine[] = {file, out[0], st[0], in[1], (i32)wake.h[0], (i32)wake.h[1], ptyfd};
     if (err) {
         closeall(mine, countof(mine));
         errno = err;
@@ -1609,6 +1694,8 @@ static Proc *spawnproc(Os *os, Spawn *sp, Arena scratch, b32 io)
     p->io       = io;
     p->infd     = in[1];
     p->wake     = wake;
+    p->tty      = tty;
+    p->ptyfd    = ptyfd;
 
     if (!os_thread(os, io ? procpipe : procreader, p)) {
         spawnkill(pid, 0);
@@ -1645,12 +1732,31 @@ static Proc *spawnproc(Os *os, Spawn *sp, Arena scratch, b32 io)
 
 static Proc *os_spawn(Os *os, Spawn *sp, Arena scratch)
 {
-    return spawnproc(os, sp, scratch, 0);
+    return spawnproc(os, sp, scratch, SPAWN_FILE);
 }
 
 static Proc *os_spawnio(Os *os, Spawn *sp, Arena scratch)
 {
-    return spawnproc(os, sp, scratch, 1);
+    return spawnproc(os, sp, scratch, SPAWN_PIPE);
+}
+
+static Proc *os_spawnpty(Os *os, Spawn *sp, i32 rows, i32 cols, Arena scratch)
+{
+    return spawnproc(os, sp, scratch, SPAWN_PTY, rows, cols);
+}
+
+// The master's own descriptor lives as long as the Proc, so this never
+// races the reader or the writer closing theirs.
+static b32 os_ptyresize(Os *, Proc *p, i32 rows, i32 cols)
+{
+    if (!p->tty || rows<1 || cols<1) {
+        errno = EINVAL;
+        return 0;
+    }
+    struct winsize ws = {};
+    ws.ws_row = (unsigned short)(rows>0xffff ? 0xffff : rows);
+    ws.ws_col = (unsigned short)(cols>0xffff ? 0xffff : cols);
+    return !ioctl(p->ptyfd, TIOCSWINSZ, &ws);
 }
 
 // A grandchild, so nothing waits for it and no reaper sweeps it: the
@@ -1776,6 +1882,12 @@ static void os_kill(Os *, Proc *p, b32 hard)
     switch (act) {
     case REAPKILL_TERM:
         sendsignal(p->pid, SIGTERM, 1);  // the reaper ignores it
+        if (p->tty) {
+            // A hangup, which the reaper passes on to the tool: a shell
+            // with job control has left the reaper's group, and ignores
+            // TERM besides
+            sendsignal(p->pid, SIGHUP, 0);
+        }
         break;
     case REAPKILL_SWEEP:
         sendsignal(p->pid, SIGUSR1, 0);
@@ -1800,6 +1912,7 @@ static void os_procfree(Os *os, Proc *p)
 // whether a sweep was asked for. The reaper is single-threaded.
 static i32          reapchld = -1;
 static volatile i32 reapasked;
+static volatile i32 reaphup;  // --reap-tty: a hangup to pass on
 
 static void onchld(int)
 {
@@ -1812,6 +1925,12 @@ static void onchld(int)
 static void onsweep(int sig)
 {
     reapasked = 1;
+    onchld(sig);
+}
+
+static void onhup(int sig)
+{
+    reaphup = 1;
     onchld(sig);
 }
 
@@ -2294,6 +2413,8 @@ static iz   reapsignal(Reaper *, i32) { return 0; }
     // setsid fail, it is still in its parent's group, which it must never
     // signal, so then it kills only the processes it finds of the tool's.
     static Reaper r;  // large, and the reaper has only this one
+    b32 tty = !__builtin_strcmp(argv[1], "--reap-tty") ||
+              !__builtin_strcmp(argv[1], "--reap-tty-disclaimed");
     r.self  = getpid();
     i32 sid = setsid();
     r.group = reapgroup(r.self, getpgrp(), sid<0 ? getsid(0) : sid);
@@ -2304,6 +2425,29 @@ static iz   reapsignal(Reaper *, i32) { return 0; }
     signal(SIGINT,  SIG_IGN);
     signal(SIGHUP,  SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
+
+    // On a terminal (--reap-tty), fd 0 becomes the session's controlling
+    // terminal, its group the foreground one, so the tool starts there and
+    // may read it; a shell with job control then takes a group of its own
+    // and the foreground with it. ^C and ^Z signal the reaper's group too,
+    // so it ignores the three signals of job control as it does INT. As
+    // the session's leader it alone gets the hangup when the terminal
+    // closes (and os_kill's soft kill sends one), which it passes on to
+    // the tool, as a terminal would to the shell that leads it. And as
+    // the controlling terminal's session leader it holds the terminal
+    // open (macOS), so the output would never end while it lived: once
+    // the tool exits, it ends what is left of the tree, hangup and TERM,
+    // then the sweep 2 s later, as when the harness is gone.
+    if (tty) {
+        if (!r.group || ioctl(0, TIOCSCTTY, 0)) {
+            reapsay("cannot take the terminal", "");
+            reapstatus(126, 0);
+            _exit(2);
+        }
+        signal(SIGTSTP, SIG_IGN);
+        signal(SIGTTIN, SIG_IGN);
+        signal(SIGTTOU, SIG_IGN);
+    }
     fcntl(3, F_SETFD, FD_CLOEXEC);
     fcntl(4, F_SETFD, FD_CLOEXEC);
     #if defined(__linux__) && defined(SYS_close_range)
@@ -2336,6 +2480,10 @@ static iz   reapsignal(Reaper *, i32) { return 0; }
     sa.sa_handler = onsweep;
     sa.sa_flags   = 0;
     sigaction(SIGUSR1, &sa, 0);  // before there is anything to sweep
+    if (tty) {
+        sa.sa_handler = onhup;
+        sigaction(SIGHUP, &sa, 0);
+    }
 
     if (chdir(argv[2])) {
         reapsay("cannot change directory to", argv[2]);
@@ -2350,7 +2498,8 @@ static iz   reapsignal(Reaper *, i32) { return 0; }
     // find what left the tree: no fork watch, and no forking parents.
     r.kq = -1;
     #ifdef __APPLE__
-    if (!__builtin_strcmp(argv[1], "--reap-disclaimed")) {
+    if (!__builtin_strcmp(argv[1], "--reap-disclaimed") ||
+            !__builtin_strcmp(argv[1], "--reap-tty-disclaimed")) {
         r.spi = respspi();
     }
     char *hook   = getenv("PROSPERO_TEST_REAP");
@@ -2373,7 +2522,7 @@ static iz   reapsignal(Reaper *, i32) { return 0; }
         posix_spawn_file_actions_addinherit_np(&fa, fd);
     }
     #endif
-    childsignals(&attr, flags, 1);
+    childsignals(&attr, flags, 1, tty);
     pid_t pid = 0;
     i32   err = posix_spawnp(&pid, argv[3], &fa, &attr, argv+3, environ);
     if (err) {
@@ -2414,6 +2563,15 @@ static iz   reapsignal(Reaper *, i32) { return 0; }
         i32 n = poll(fds, 3, ms);
         u8  drain[64];
         while (read(chld[0], drain, sizeof(drain)) > 0) {}
+        if (reaphup) {
+            // Before reapchildren, so the tool's pid is still its own,
+            // if only as a zombie, until reported
+            reaphup = 0;
+            if (!r.reported) {
+                sendsignal(r.tool, SIGHUP, 0);
+                sendsignal(r.tool, SIGCONT, 0);
+            }
+        }
         reapchildren(&r);
         reapforks(&r);
         if (every>0 && monotonic()>=due) {
@@ -2430,13 +2588,21 @@ static iz   reapsignal(Reaper *, i32) { return 0; }
                 break;  // the harness is gone
             }
         }
+        if (tty && r.reported) {
+            break;  // the terminal's tool is gone: see above
+        }
     }
 
-    // Ask everything to stop, then sweep
-    if (r.group) {
-        sendsignal(r.group, SIGTERM, 1);
+    // Ask everything to stop, then sweep: on a terminal, a hangup first,
+    // as when its window closes
+    i32 sigs[] = {SIGHUP, SIGTERM};
+    for (i32 i = tty ? 0 : 1; i < countof(sigs); i++) {
+        i32 sig = sigs[i];
+        if (r.group) {
+            sendsignal(r.group, sig, 1);
+        }
+        reapsignal(&r, sig);
     }
-    reapsignal(&r, SIGTERM);
     for (i32 i = 0; i < 200; i++) {
         reapnap(10);
         reapchildren(&r);
@@ -3574,7 +3740,9 @@ extern "C" int prospero_desktop(int argc, char **argv);
 int main(int argc, char **argv)
 {
     if (argc>1 && (!__builtin_strcmp(argv[1], "--reap") ||
-                   !__builtin_strcmp(argv[1], "--reap-disclaimed"))) {
+                   !__builtin_strcmp(argv[1], "--reap-disclaimed") ||
+                   !__builtin_strcmp(argv[1], "--reap-tty") ||
+                   !__builtin_strcmp(argv[1], "--reap-tty-disclaimed"))) {
         reap(argc, argv);
     }
     #if PROSPERO_DESKTOP
