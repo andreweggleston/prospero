@@ -231,8 +231,9 @@ static Proc   *os_spawn(Os *, Spawn *, Arena scratch);
 // left the group (the reaper's sweep), or terminates the job. Prompt:
 // neither waits for the processes.
 static void    os_kill(Os *, Proc *, b32 hard);
-// Drop the caller's reference. Kills nothing by itself on POSIX, but on
-// Windows closing the last reference closes the job, killing the tree.
+// Drop the caller's reference. Kills nothing by itself on POSIX (but a
+// terminal's hangs up: os_spawnpty), while on Windows closing the last
+// reference closes the job, killing the tree.
 static void    os_procfree(Os *, Proc *);
 
 // (M2) HTTP requests, each on its own thread, posting records to mbox:
@@ -282,8 +283,13 @@ static b32     os_procwrite(Os *, Proc *, Str);
 // it. outpath and maxbytes are unused. When the child exits, whatever it
 // left running gets a hangup and TERM, then 2 s later is killed, and the
 // output ends, with PROC_EOF. os_kill soft hangs up (SIGHUP to the child,
-// as closing a terminal window sends); hard as ever. POSIX only:
-// elsewhere null, as on failure, explained by os_lasterr.
+// as closing a terminal window sends); hard as ever. The terminal stays
+// open while the Proc's threads hold it, so freeing the Proc alone ends
+// nothing, and os_procfree hangs up too, as closing the window would;
+// but what ignores a hangup outlives that. So to close a terminal: the
+// soft kill, a wait for PROC_EXIT, a short one, then the hard kill if it
+// did not come, and only then os_procfree. POSIX only: elsewhere null,
+// as on failure, explained by os_lasterr.
 static Proc   *os_spawnpty(Os *, Spawn *, i32 rows, i32 cols, Arena scratch);
 // Set its terminal's size, which signals SIGWINCH to what runs in it.
 // Returns 0 if not a terminal's, or on failure.

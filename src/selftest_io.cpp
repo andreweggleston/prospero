@@ -676,6 +676,67 @@ static void testspawnpty(ProcTest *p, Arena scratch)
     check(t, procwatch(os, p->mb, p->id, &w, 5000), "the soft kill ends an interactive shell");
     os_kill(os, pr, 1);
     os_procfree(os, pr);
+
+    // Job control: ^Z stops the foreground job and gives the shell the
+    // terminal back, so it runs the next line at once, before the job
+    // could have finished, and fg resumes the job, which then finishes
+    pr = spawnpty(p, scratch, {iargv, 2, 2}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh -i for job control")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    os_procwrite(os, pr, "echo RE\"\"ADY\r");
+    check(t, ptysees(p, &w, "READY", 10000), "the shell is ready");
+    os_procwrite(os, pr, "sh -c 'sleep 2; echo WO\"\"KE'\r");
+    procwatch(os, p->mb, p->id, &w, 500);  // until the job runs
+    os_procwrite(os, pr, "\x1a");
+    os_procwrite(os, pr, "echo STOP\"\"PED\r");
+    check(t, ptysees(p, &w, "STOPPED", 1500), "^Z stops the job, and the shell has the terminal");
+    os_procwrite(os, pr, "fg\r");
+    check(t, ptysees(p, &w, "WOKE", 10000), "fg resumes it");
+    {
+        Str got = finish(&w.keep);
+        check(t, find(got, "STOPPED") < find(got, "WOKE"), "it finished only after it was stopped");
+    }
+    os_procwrite(os, pr, "exit\r");
+    check(t, procwatch(os, p->mb, p->id, &w, 5000), "the shell exits");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // A line past macOS's 1024 bytes of a canonical line, typed as a
+    // paste is, all at once: the shell edits its own lines, raw, so all
+    // of it arrives. Only once it is ready: typed ahead, before it turns
+    // line editing on, the terminal's own (canonical) mode keeps 1024
+    // bytes of a line on macOS, and drops the rest, as in any terminal
+    pr = spawnpty(p, scratch, {iargv, 2, 2}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh -i for a long line")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    os_procwrite(os, pr, "echo RE\"\"ADY\r");
+    check(t, ptysees(p, &w, "READY", 10000), "the shell is ready");
+    {
+        Buf line(&scratch, 4096);
+        print(&line, "printf %s '");
+        for (i32 i = 0; i < 3000; i++) {
+            putbyte(&line, (u8)('a' + i%26));
+        }
+        print(&line, "' | wc -c | tr -d ' '; echo EN\"\"D\r");
+        check(t, os_procwrite(os, pr, finish(&line)), "typing a long line");
+    }
+    check(t, ptysees(p, &w, "END", 10000), "the long line runs");
+    check(t, find(finish(&w.keep), "\n3000\r\n") >= 0, "all 3000 bytes of it arrive");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // Freeing the Proc with no kill hangs up, as closing a terminal's
+    // window does, and an interactive shell ends
+    pr = spawnpty(p, scratch, {iargv, 2, 2}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh -i to free")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    os_procwrite(os, pr, "echo RE\"\"ADY\r");
+    check(t, ptysees(p, &w, "READY", 10000), "the shell is ready");
+    os_procfree(os, pr);
+    check(t, procwatch(os, p->mb, p->id, &w, 5000), "os_procfree alone ends the shell");
     say(os, "spawnpty done");
 }
 

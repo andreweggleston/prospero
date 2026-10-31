@@ -1903,6 +1903,9 @@ static void os_kill(Os *, Proc *p, b32 hard)
 
 static void os_procfree(Os *os, Proc *p)
 {
+    if (p->tty) {
+        os_kill(os, p, 0);  // a hangup, as a terminal's window closing sends
+    }
     if (p->io) {
         os_procwrite(os, p, {});  // close the input after the queue
     }
