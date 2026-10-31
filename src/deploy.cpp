@@ -17,6 +17,8 @@
 //    "SYSNAME MACHINE" and then "%OS%" as it is. cmd.exe expands the
 //    variables instead, after a uname of its own (Git's) if it has one,
 //    else with the processor architecture, then ver's version line.
+//    A reached host whose login shell takes neither (fish, csh,
+//    nushell) is probed once more, in sh -c (deployprobesh).
 // 2. Choose prospero-engine-VERSION-OS-ARCH[.exe] from the engines
 //    directory (the first with one of "engines" next to this
 //    executable and beside the default prospero.ini, unless given;
@@ -100,6 +102,10 @@ static Str deployopts[] = {
 static Str deployprobe =
     "uname -sm && echo %OS% || (echo %OS% %PROCESSOR_ARCHITECTURE% "
     "%PROCESSOR_ARCHITEW6432% && ver)";
+
+// For a login shell neither sh nor cmd.exe (fish, csh, nushell): sh
+// prints %OS% as it is, so this parses as DEPLOY_SH.
+static Str deployprobesh = "sh -c 'uname -sm && echo %OS%'";
 
 struct DeployConf {
     Str       name;        // for messages: the remote's name, or ssh
@@ -1250,6 +1256,16 @@ static Deployed deploysteps(Deploy d, Arena *perm, Arena scratch, Str dest, Str 
     deploynote(&d, scratch, "probe", finish(&b));
     DeployRun pr = deployssh(&d, &scratch, "probe", deployprobe);
     Platform  pf = deployplatform(&scratch, pr.out);
+    if (!pf.ok && !deploycancelled(&d) && pr.code>=0 && pr.code!=255 &&
+        !conf->wsl.len) {
+        // reached, but neither sh nor cmd.exe: once more in sh -c
+        DeployRun pr2 = deployssh(&d, &scratch, "probe", deployprobesh);
+        Platform  pf2 = deployplatform(&scratch, pr2.out);
+        if (pf2.ok) {
+            pr = pr2;
+            pf = pf2;
+        }
+    }
     if (deploycancelled(&d)) {
         return deployfail(&d, perm, scratch, "cancelled");
     } else if (!pf.ok) {

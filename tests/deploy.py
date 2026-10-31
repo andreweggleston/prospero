@@ -75,7 +75,13 @@ args = sys.argv[1:]
 with open(os.path.join(os.environ["FAKELOG"], "ssh.log"), "a", newline="") as f:
     f.write(" ".join(args) + "\n")
 cmd = command(args)
-if os.environ.get("FAKEUNAME") and cmd.startswith("uname"):
+# FAKEFISH: a login shell (fish's) that takes only what starts sh -c '
+if os.environ.get("FAKEFISH") and not cmd.startswith("sh -c '"):
+    sys.stderr.write("fish: Expected a command, but found end of the input\n"
+                     "uname -sm && echo %OS% || (echo %OS%\n"
+                     "                          ^~~~~~~~^\n")
+    sys.exit(127)
+if os.environ.get("FAKEUNAME") and cmd.startswith(("uname", "sh -c 'uname")):
     sys.stdout.buffer.write(os.environ["FAKEUNAME"].encode() + b"\n%OS%\n")
     sys.exit(0)
 if os.environ.get("FAKEPATH"):
@@ -437,6 +443,21 @@ def no_engine(t):
     t.check("no engine for linux-sparc64" in p.stderr and "tools/engines.py" in p.stderr,
             f"stderr {p.stderr}")
     t.check(not os.path.exists(os.path.join(t.local, "deploy", "here.ini")), "recorded")
+    t.check(t.sshlog().count("uname") == 1, f"probed more than once: {t.sshlog()}")
+
+
+@scenario
+def fish_shell(t):
+    """A login shell neither sh nor cmd.exe (fish): the probe again in sh
+    -c gets past it, to the platform's engine, or the lack of one."""
+    p = t.deploy(env=dict(t.env, FAKEFISH="1", FAKEUNAME="Linux sparc64"))
+    t.check(p.returncode == 1, f"exit {p.returncode}")
+    t.check("no engine for linux-sparc64" in p.stderr, f"stderr {p.stderr}")
+    t.check(t.sshlog().count("uname") == 2, f"probes: {t.sshlog()}")
+    t.engine()
+    p = t.deploy(env=dict(t.env, FAKEFISH="1"))
+    t.check(p.returncode == 0, f"deploy: {p.stderr}")
+    t.check(os.path.isfile(t.deployed()), "deployed")
 
 
 @scenario
