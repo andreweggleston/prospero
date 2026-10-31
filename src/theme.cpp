@@ -11,11 +11,13 @@
 // text (hints, disabled labels) that still reads on a field, rows
 // selected, hovered and pressed, buttons, and progress bars. Selected
 // text has a color of its own, since no one color of the transcript's
-// reads on every background, the selection's among them. Colors are packed as ImGui packs them (IM_COL32,
-// red in the low byte, alpha in the high), so this file needs no ImGui,
-// and the unit tests check that every text color reads against the
-// backgrounds it is drawn on, by the WCAG's measure: a contrast ratio of
-// at least 4.5 (AA for normal text).
+// reads on every background, the selection's among them. The terminal
+// pane's 16 colors read on the panel as well, its black and white among
+// them, at a cost to their likeness. Colors are packed as ImGui packs
+// them (IM_COL32, red in the low byte, alpha in the high), so this file
+// needs no ImGui, and the unit tests check that every text color reads
+// against the backgrounds it is drawn on, by the WCAG's measure: a
+// contrast ratio of at least 4.5 (AA for normal text).
 //
 // The setting, [ui] theme, is dark, light, or system, the default, which
 // follows the operating system's preference as the platform reports it,
@@ -73,6 +75,12 @@ struct Palette {
     u32 amber;      // waiting, asking, stalled
     u32 active;     // running, streaming
     u32 stale;      // the metrics overlay's alarm
+    // The terminal pane's 16 colors (black, red, green, yellow, blue,
+    // magenta, cyan, white, then their bright forms), as text on panel,
+    // its background; text is its default foreground. Each reads there,
+    // black and white too: the dark theme's black is a gray, and the
+    // light theme's white
+    u32 ansi[16];
 };
 
 static constexpr u32 rgb(i32 r, i32 g, i32 b)
@@ -130,6 +138,12 @@ static Palette themedark = {
     .amber     = rgb(235, 180,  80),
     .active    = rgb(110, 170, 240),
     .stale     = rgb(255, 102,  77),
+    .ansi = {
+        rgb(128, 128, 136), rgb(230, 110, 110), rgb(120, 200, 120), rgb(220, 190,  90),
+        rgb(100, 150, 240), rgb(200, 130, 220), rgb( 86, 182, 194), rgb(200, 200, 200),
+        rgb(150, 150, 158), rgb(250, 132, 132), rgb(150, 225, 140), rgb(240, 215, 120),
+        rgb(130, 175, 250), rgb(220, 160, 240), rgb(120, 210, 220), rgb(255, 255, 255),
+    },
 };
 
 static Palette themelight = {
@@ -182,6 +196,12 @@ static Palette themelight = {
     .amber     = rgb(125,  78,   0),
     .active    = rgb(  0,  80, 176),
     .stale     = rgb(180,  40,  20),
+    .ansi = {
+        rgb( 32,  33,  36), rgb(168,  24,  34), rgb( 16, 100,  42), rgb(125,  78,   0),
+        rgb(  0,  80, 176), rgb(130,  40, 160), rgb(  0, 100, 120), rgb(105, 105, 105),
+        rgb( 80,  80,  84), rgb(190,  30,  40), rgb( 20, 115,  50), rgb(140,  90,   0),
+        rgb( 20,  95, 200), rgb(150,  50, 180), rgb(  0, 115, 135), rgb( 85,  85,  88),
+    },
 };
 
 // The setting's value from its name, or -1 if it names none.

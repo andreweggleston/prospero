@@ -106,5 +106,20 @@ static void test_theme(Test *t)
             print(&n, " on codebg");
             expect(t, finish(&n), finish(&b), "AA");
         }
+        for (i32 i = 0; i < 16; i++) {
+            f64 r = contrast(pal->ansi[i], pal->panel);
+            Buf b(&a, 16);
+            if (r < 4.5) {
+                printfloat(&b, r, 2);
+            } else {
+                print(&b, "AA");
+            }
+            Buf n(&a, 64);
+            print(&n, name);
+            print(&n, "terminal color ");
+            print(&n, (i64)i);
+            print(&n, " on panel");
+            expect(t, finish(&n), finish(&b), "AA");
+        }
     }
 }
