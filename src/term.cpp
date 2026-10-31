@@ -482,7 +482,10 @@ static VTermScreenCallbacks const termcallbacks = {
 
 // A terminal of rows by cols that keeps sbmax lines of scrollback,
 // sending what it answers and what is typed to out. Null if out of
-// memory.
+// memory. Lines are not rewrapped when it narrows or widens, as xterm
+// does not: libvterm 0.3.3's reflow, shrinking the screen while its
+// top row continues a line that scrolled off, moved the rows down and
+// left the top one uncleared, drawn as garbage.
 static Term *termnew(i32 rows, i32 cols, i32 sbmax, void (*out)(void *, Str), void *outctx)
 {
     rows  = rows<1 ? 1 : rows;
@@ -514,7 +517,7 @@ static Term *termnew(i32 rows, i32 cols, i32 sbmax, void (*out)(void *, Str), vo
     vterm_screen_set_callbacks(t->screen, &termcallbacks, t);
     vterm_screen_set_damage_merge(t->screen, VTERM_DAMAGE_SCROLL);
     vterm_screen_enable_altscreen(t->screen, 1);
-    vterm_screen_enable_reflow(t->screen, true);
+    vterm_screen_enable_reflow(t->screen, false);
     vterm_screen_reset(t->screen, 1);
     return t;
 }

@@ -89,6 +89,65 @@ static void test_term(Test *t)
     expect(t, "term.sbclear", istr(&a, tm->sblen), "0");
     termfree(tm);
 
+    // Shorter, the scrollback erased (clear), then taller again: what
+    // comes back from the scrollback is the lines as they were, and
+    // nothing else on the screen
+    tm = termnew(17, 51, 100, termsink, &out);
+    for (i32 i = 0; i < 30; i++) {
+        termwrite(tm, "\n\x1b[1;32m[me@host:/tmp]$\x1b[0m echo hi\r\nhi\r\n");
+    }
+    termresize(tm, 11, 51);
+    termwrite(tm, "\x1b[H\x1b[2J\x1b[3J11 51\r\n");
+    for (i32 i = 0; i < 12; i++) {
+        termwrite(tm, "\n\x1b]0;me@host: /tmp\x07\x1b[1;32m[me@host:/tmp]$\x1b[0m sleep 30\r\n^C\r\n");
+    }
+    termresize(tm, 17, 51);
+    for (i32 i = 0; i < 40; i++) {
+        termresize(tm, 10 + (i*7)%9, 40 + (i*5)%13);
+        if (i%10 == 3) {
+            termwrite(tm, "\x1b[H\x1b[2J\x1b[3J");
+        }
+        termwrite(tm, "\n\x1b[1;32m[me@host:/tmp]$\x1b[0m sleep 30\r\n^C\r\n");
+    }
+    {
+        i32 bad = 0;
+        for (i32 row = -tm->sblen; row < tm->rows; row++) {
+            for (i32 col = 0; col < tm->cols; col++) {
+                TermCell c = termcell(tm, row, col);
+                b32 ok = (!c.ch[0] || (c.ch[0]>=' ' && c.ch[0]<0x7f)) && !c.ch[1] &&
+                         (c.fg==TERM_DEFAULT || c.fg==(TERM_INDEXED|2)) &&
+                         c.bg==TERM_DEFAULT && !(c.attrs & ~TERM_BOLD);
+                bad += !ok;
+            }
+        }
+        expect(t, "term.resizeclear", istr(&a, bad), "0");
+    }
+    termfree(tm);
+
+    // A row fewer, as when the pane makes room for Restart, while the
+    // top row continues a line that scrolled off: no row left uncleared
+    // (libvterm's reflow left one so)
+    tm = termnew(17, 43, 100, termsink, &out);
+    // A wrapped line whose head scrolled off, its tail on the top row
+    termwrite(tm, "a line long enough that it wraps past forty-three columns\r\n");
+    for (i32 i = 0; i < 15; i++) {
+        termwrite(tm, "line\r\n");
+    }
+    termwrite(tm, "\x1b[14;1H\x1b[J");  // the bottom rows blank, the cursor above
+    termresize(tm, 16, 43);
+    termresize(tm, 15, 43);
+    {
+        i32 bad = 0;
+        for (i32 row = 0; row < tm->rows; row++) {
+            for (i32 col = 0; col < tm->cols; col++) {
+                TermCell c = termcell(tm, row, col);
+                bad += c.fg!=TERM_DEFAULT || c.bg!=TERM_DEFAULT;
+            }
+        }
+        expect(t, "term.shrinkfull", istr(&a, bad), "0");
+    }
+    termfree(tm);
+
     // The ring keeps the newest sbmax lines
     tm = termnew(2, 10, 3, termsink, &out);
     termwrite(tm, "a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng");
