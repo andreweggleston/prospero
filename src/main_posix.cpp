@@ -54,6 +54,7 @@
 #  include "imgui_impl_opengl3.h"
 #  include "misc/freetype/imgui_freetype.h"
 #  include "md4c.h"
+#  include "vterm.h"
 #endif
 #include "prospero.cpp"
 #include "reap.cpp"

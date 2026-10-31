@@ -30,6 +30,7 @@
 #  include "imgui_internal.h"
 #  include "misc/freetype/imgui_freetype.h"
 #  include "md4c.h"
+#  include "vterm.h"
 #endif
 #include "prospero.cpp"
 #include "wide.cpp"

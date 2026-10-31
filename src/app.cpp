@@ -72,6 +72,7 @@
 #include "pathpick.cpp"
 #include "sidebar.cpp"
 #include "dock.cpp"
+#include "term.cpp"
 
 enum : i64 {
     STREAM_PERIOD = 1000000/30,  // µs between frames showing new deltas
