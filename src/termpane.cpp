@@ -522,6 +522,11 @@ static void termgrid(Gui *g, GuiTerm *t, ImVec2 o, f32 cw, f32 lh, b32 focused)
     f32          size  = stylesize(f, STYLE_CODE);
     ImFont      *plain = stylefont(f, STYLE_CODE);
     ImFont      *bold  = stylefont(f, STYLE_CODE|STYLE_BOLD);
+    // A font whose advance is not the cell's (synthetic bold, wider by its
+    // emboldening) draws cell by cell, else its runs drift off the grid
+    f32          eps   = 0.01f;
+    b32          runsplain = __builtin_fabsf(stylebaked(f, STYLE_CODE)->GetCharAdvance('M') - cw) < eps;
+    b32          runsbold  = __builtin_fabsf(stylebaked(f, STYLE_CODE|STYLE_BOLD)->GetCharAdvance('M') - cw) < eps;
     f32          dy    = (lh - size)/2;
     TermLook     look  = {};
     for (i32 i = 0; i < 16; i++) {
@@ -570,7 +575,8 @@ static void termgrid(Gui *g, GuiTerm *t, ImVec2 o, f32 cw, f32 lh, b32 focused)
                 c = termcell(tm, row, col);
                 termcolors(&look, tm, c, &fg, &bg);
                 font   = c.attrs & TERM_BOLD ? bold : plain;
-                simple = c.width==1 && c.ch[0]<0x80 && !c.ch[1];
+                simple = c.width==1 && c.ch[0]<0x80 && !c.ch[1] &&
+                         (font==bold ? runsbold : runsplain);
             }
             if (run.len && (col==tm->cols || !simple || fg!=runfg || font!=runfont)) {
                 dl->AddText(runfont, size, v2(o.x + (f32)start*cw, y + dy), runfg,
