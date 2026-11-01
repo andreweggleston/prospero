@@ -105,19 +105,10 @@ static Str termcommand(Gui *g, Arena *a, GuiSession *s, Spawn *sp)
         Str ssh = remoteset(g, h->name, "ssh");
         Str wsl = ssh.len ? Str{} : remoteset(g, h->name, "wsl");
         if (ssh.len) {
-            // termssh's, with keepalives before its "--"
-            Slice<Str> cmd = termssh(a, linkprogram(g, a, 0), ssh, dir, hostwin(h));
-            argv = push(a, argv, cmd[0]);
-            argv = push(a, argv, cmd[1]);  // -t
-            Str opts[] = {"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"};
-            for (iz i = 0; i < countof(opts); i++) {
-                argv = push(a, argv, opts[i]);
-            }
-            for (iz i = 2; i < cmd.len; i++) {
-                argv = push(a, argv, cmd[i]);
-            }
+            argv = termsshpane(a, linkprogram(g, a, 0), ssh, dir, hostwin(h));
         } else if (wsl.len) {
-            argv = termwsl(a, linkprogram(g, a, 1), wsl, dir);
+            Str prog = linkprogram(g, a, 1);
+            argv = termwsl(a, prog.len ? prog : Str("wsl.exe"), wsl, dir);
         } else {
             return "Its section names no ssh destination";
         }

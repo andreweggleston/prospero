@@ -171,6 +171,14 @@ static void test_compose(Test *t)
            "ssh|-t|--|me@box|cd '/home/me/it'\\''s' && exec \"$SHELL\" -l");
     expect(t, "term.sshwin", argstr(&a, termssh(&a, "ssh", "box", "C:\\w", 1)),
            "ssh|-t|--|box|cmd /k cd /d \"C:\\w\"");
+    // The terminal pane's: ssh by name when no stand-in is set (empty),
+    // never an empty program, with keepalives before "--"
+    expect(t, "term.panessh", argstr(&a, termsshpane(&a, {}, "nascar", "/w", 0)),
+           "ssh|-t|-o|ServerAliveInterval=15|-o|ServerAliveCountMax=3|--|nascar|"
+           "cd '/w' && exec \"$SHELL\" -l");
+    expect(t, "term.panestandin", argstr(&a, termsshpane(&a, "/t/fakessh", "here", "/w", 0)),
+           "/t/fakessh|-t|-o|ServerAliveInterval=15|-o|ServerAliveCountMax=3|--|here|"
+           "cd '/w' && exec \"$SHELL\" -l");
     Slice<Str> wsl = termwsl(&a, "wsl.exe", "Debian", "/mnt/c/w");
     expect(t, "term.wsl", argstr(&a, wsl), "wsl.exe|-d|Debian|--cd|/mnt/c/w");
     TermRun tr = termargv(&a, TERM_MAC, {}, "/p", none);

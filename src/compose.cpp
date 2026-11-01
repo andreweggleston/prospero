@@ -597,6 +597,26 @@ static Slice<Str> termssh(Arena *a, Str ssh, Str dest, Str dir, b32 windows)
     return r;
 }
 
+// The terminal pane's command for a remote's session: termssh's, ssh by
+// name unless a test's stand-in (program, else empty), with keepalives,
+// so that a link that dies ends it in about 45 s rather than leaving a
+// pane that just stops.
+static Slice<Str> termsshpane(Arena *a, Str program, Str dest, Str dir, b32 windows)
+{
+    Slice<Str> cmd = termssh(a, program.len ? program : Str("ssh"), dest, dir, windows);
+    Slice<Str> r   = {};
+    r = push(a, r, cmd[0]);
+    r = push(a, r, cmd[1]);  // -t
+    Str opts[] = {"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"};
+    for (iz i = 0; i < countof(opts); i++) {
+        r = push(a, r, opts[i]);
+    }
+    for (iz i = 2; i < cmd.len; i++) {  // --, the destination, the command
+        r = push(a, r, cmd[i]);
+    }
+    return r;
+}
+
 // The command that opens a shell in dir in a WSL distro.
 static Slice<Str> termwsl(Arena *a, Str wsl, Str distro, Str dir)
 {
