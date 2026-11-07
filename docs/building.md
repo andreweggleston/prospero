@@ -7,12 +7,13 @@ CMake 3.25 or later and a C++20 compiler with `#embed`, on macOS, Windows
     $ cmake --build build
 
 Dependencies are fetched at configure time, pinned by URL and SHA-256:
-Dear ImGui (docking branch), md4c, FreeType and SDL3 for the GUI, mbedTLS
-with cpp-httplib for HTTP on macOS and Linux, and Wuffs's single-file
-release for decoding images everywhere. To build offline, or with a
-modified dependency, put its source under `deps/` (`deps/imgui`,
-`deps/md4c`, `deps/freetype`, `deps/sdl3`, `deps/mbedtls`,
-`deps/cpp-httplib`, and `deps/wuffs` holding `wuffs-v0.4.c`).
+Dear ImGui (docking branch), md4c, FreeType, SDL3 and libvterm for the
+GUI, mbedTLS with cpp-httplib for HTTP on macOS and Linux, and Wuffs's
+single-file release for decoding images everywhere. To build offline,
+or with a modified dependency, put its source under `deps/`
+(`deps/imgui`, `deps/md4c`, `deps/freetype`, `deps/sdl3`,
+`deps/libvterm`, `deps/mbedtls`, `deps/cpp-httplib`, and `deps/wuffs`
+holding `wuffs-v0.4.c`).
 
 The Windows GUI is its own Win32 layer over Direct3D 11, and HTTP goes
 through WinHTTP, so it uses the system's certificates and proxies. The

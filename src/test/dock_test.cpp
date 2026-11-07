@@ -50,7 +50,7 @@ static void test_dock(Test *t)
            "Center=Transcript\n"
            "Tabs=Prompt\n"
            "Split=Y,0.5\n"
-           "Tabs=*Jobs,Log,Help,Settings,Hosts\n"
+           "Tabs=*Jobs,Log,Terminal,Help,Settings,Hosts\n"
            "Tabs=Plan,Changes\n");
 
     // Compact keeps the left column's width, with no right column
@@ -60,7 +60,7 @@ static void test_dock(Test *t)
            "Split=X,0.165\n"
            "Split=Y,0.75\n"
            "Tabs=Sessions\n"
-           "Tabs=*Todo,Jobs,Log\n"
+           "Tabs=*Todo,Jobs,Log,Terminal\n"
            "Split=Y,0.72\n"
            "Center=*Transcript,Plan,Changes,Help,Settings,Hosts\n"
            "Tabs=Prompt\n"
@@ -71,7 +71,7 @@ static void test_dock(Test *t)
     expect(t, "dock.focus", dockstr(&a, &focus),
            "Shown=Transcript,Prompt,Todo,Plan\n"
            "Split=Y,0.72\n"
-           "Center=*Transcript,Todo,Plan,Changes,Sessions,Jobs,Log,Help,Settings,Hosts\n"
+           "Center=*Transcript,Todo,Plan,Changes,Sessions,Jobs,Log,Terminal,Help,Settings,Hosts\n"
            "Tabs=Prompt\n"
            "TabBar=Hidden\n");
 

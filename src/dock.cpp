@@ -37,7 +37,7 @@
 //   Tabs=Prompt
 //   TabBar=Hidden
 //   Split=Y,0.5
-//   Tabs=*Jobs,Log,Help,Settings,Hosts
+//   Tabs=*Jobs,Log,Terminal,Help,Settings,Hosts
 //   Tabs=Plan,Changes
 //   Float=Metrics,0.3,0.2,0.4,0.5
 //
@@ -62,6 +62,7 @@ enum : i32 {
     PANE_LOG,
     PANE_HOSTS,
     PANE_SETTINGS,
+    PANE_TERMINAL,
     PANE_HELP,
     PANE_METRICS,
     PANE_COUNT,
@@ -70,15 +71,16 @@ static_assert(PANE_COUNT <= 32);  // as bits of a u32
 
 static char const *panenames[] = {
     "Sessions", "Transcript", "Prompt", "Todo", "Plan", "Changes", "Jobs", "Log",
-    "Hosts", "Settings", "Help", "Metrics",
+    "Hosts", "Settings", "Terminal", "Help", "Metrics",
 };
 static_assert(countof(panenames) == PANE_COUNT);
 
-// The panes hidden until asked for: the metrics, and the changes, which
-// a click on the session bar's branch shows (ui.cpp drawbranch).
+// The panes hidden until asked for: the metrics, the changes, which a
+// click on the session bar's branch shows (ui.cpp drawbranch), and the
+// terminal, which Open in terminal shows.
 static b32 panehidden(i32 pane)
 {
-    return pane==PANE_METRICS || pane==PANE_CHANGES;
+    return pane==PANE_METRICS || pane==PANE_CHANGES || pane==PANE_TERMINAL;
 }
 
 #ifndef PROSPERO_DEVTOOLS
@@ -469,7 +471,8 @@ static Str docknamewhy(Str name)
 // little room for them.
 static DockLayout dockpreset(i32 preset)
 {
-    u32        extras = 1u<<PANE_HELP | 1u<<PANE_SETTINGS | 1u<<PANE_HOSTS;
+    u32        extras = 1u<<PANE_HELP | 1u<<PANE_SETTINGS | 1u<<PANE_HOSTS |
+                         1u<<PANE_TERMINAL;
     DockLayout l      = {};
     l.name = presetnames[preset];
     switch (preset) {
@@ -484,7 +487,7 @@ static DockLayout dockpreset(i32 preset)
         dockline(&l, "Center", "Transcript");
         dockline(&l, "Tabs", "Prompt");
         docksplit(&l, DOCK_Y, 1 - LAYOUT_PLAN);
-        dockline(&l, "Tabs", "*Jobs,Log,Help,Settings,Hosts");
+        dockline(&l, "Tabs", "*Jobs,Log,Terminal,Help,Settings,Hosts");
         dockline(&l, "Tabs", "Plan,Changes");
         l.keep = extras;
         break;
@@ -493,7 +496,7 @@ static DockLayout dockpreset(i32 preset)
         docksplit(&l, DOCK_X, LAYOUT_LEFT*(1 - LAYOUT_RIGHT));  // as Standard's
         docksplit(&l, DOCK_Y, 1 - LAYOUT_TODO);
         dockline(&l, "Tabs", "Sessions");
-        dockline(&l, "Tabs", "*Todo,Jobs,Log");
+        dockline(&l, "Tabs", "*Todo,Jobs,Log,Terminal");
         docksplit(&l, DOCK_Y, 1 - LAYOUT_PROMPT);
         dockline(&l, "Center", "*Transcript,Plan,Changes,Help,Settings,Hosts");
         dockline(&l, "Tabs", "Prompt");
@@ -504,7 +507,7 @@ static DockLayout dockpreset(i32 preset)
         dockline(&l, "Shown", "Transcript,Prompt,Todo,Plan");
         docksplit(&l, DOCK_Y, 1 - LAYOUT_PROMPT);
         dockline(&l, "Center", "*Transcript,Todo,Plan,Changes,Sessions,Jobs,Log,"
-                               "Help,Settings,Hosts");
+                               "Terminal,Help,Settings,Hosts");
         dockline(&l, "Tabs", "Prompt");
         dockline(&l, "TabBar", "Hidden");
         break;

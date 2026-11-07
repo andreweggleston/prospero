@@ -42,7 +42,7 @@ window's own words, and only one that exists:
   `settings` topic names each page and gives its link.
 - `[View → Hosts](view:hosts)` shows a pane: `sessions`, `transcript`,
   `prompt`, `todo`, `plan`, `changes`, `jobs`, `log`, `hosts`,
-  `settings` or `help`.
+  `settings`, `terminal` or `help`.
 - A web link, `https://...`, opens in the user's browser.
 
 ## Changing settings

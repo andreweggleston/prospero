@@ -5725,6 +5725,7 @@ static void trashroots(Gui *g, Arena a, Slice<GuiSession *> roots)
 // to being listed.
 static void sessclose(Gui *g, GuiSession *s)
 {
+    termsessclose(g, s);  // its terminal, open or not
     if (!s->view) {
         return;
     }
@@ -11830,6 +11831,15 @@ static void dockwindows(Gui *g)
     if (show[PANE_LOG]) {
         if (beginpane(g, PANE_LOG)) {
             drawlog(g);
+        }
+        ImGui::End();
+    }
+    if (show[PANE_TERMINAL]) {
+        if (near) {
+            ImGui::SetNextWindowDockID(near, ImGuiCond_FirstUseEver);
+        }
+        if (beginpane(g, PANE_TERMINAL)) {
+            drawterminal(g);
         }
         ImGui::End();
     }

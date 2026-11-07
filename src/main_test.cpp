@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #if PROSPERO_GUI
 #  include "md4c.h"
+#  include "vterm.h"
 #endif
 #include "prospero.cpp"
 #include "wide.cpp"
@@ -464,6 +465,8 @@ static Slice<Str> os_environ(Os *, Arena *) { return {}; }
 static iz    os_stdin(Os *, u8 *, iz) { return 0; }
 static Proc *os_spawn(Os *, Spawn *, Arena) { return 0; }
 static Proc *os_spawnio(Os *, Spawn *, Arena) { return 0; }
+static Proc *os_spawnpty(Os *, Spawn *, i32, i32, Arena) { return 0; }
+static b32   os_ptyresize(Os *, Proc *, i32, i32) { return 0; }
 static b32 os_launch(Os *, Arena, Slice<Str>, Str, Slice<Str>) { return 0; }
 static b32   os_procwrite(Os *, Proc *, Str) { return 0; }
 static void  os_kill(Os *, Proc *, b32) {}
@@ -635,6 +638,7 @@ static Str istr(Arena *a, i64 v)
 #  include "pathpick.cpp"
 #  include "sidebar.cpp"
 #  include "dock.cpp"
+#  include "term.cpp"
 #  include "test/sched_test.cpp"
 #  include "test/highlight_test.cpp"
 #  include "test/doc_test.cpp"
@@ -649,6 +653,7 @@ static Str istr(Arena *a, i64 v)
 #  include "test/pathpick_test.cpp"
 #  include "test/sidebar_test.cpp"
 #  include "test/dock_test.cpp"
+#  include "test/term_test.cpp"
 #endif
 
 int main()
@@ -720,6 +725,7 @@ int main()
     test_pathpick(&t);
     test_sidebar(&t);
     test_dock(&t);
+    test_term(&t);
     test_viewexport(&t);
     #endif
 

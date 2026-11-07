@@ -571,6 +571,175 @@ static void testspawnio(ProcTest *p, Arena scratch)
     say(os, "spawnio done");
 }
 
+static Proc *spawnpty(ProcTest *p, Arena scratch, Slice<Str> argv, i32 rows, i32 cols)
+{
+    Spawn sp = {};
+    sp.argv = argv;
+    sp.cwd  = p->dir;
+    sp.env  = p->env;
+    sp.mbox = p->mb;
+    sp.id   = ++p->id;
+    return os_spawnpty(p->os, &sp, rows, cols, scratch);
+}
+
+// Watch a terminal's child until its output holds want, or it ends.
+static b32 ptysees(ProcTest *p, ProcWatch *w, Str want, i32 ms)
+{
+    i64 deadline = os_ticks(p->os) + (i64)ms*1000;
+    while (find(finish(&w->keep), want) < 0) {
+        if (os_ticks(p->os)>=deadline || (w->exitat && w->eofat)) {
+            return 0;
+        }
+        procwatch(p->os, p->mb, p->id, w, 20);
+    }
+    return 1;
+}
+
+// Children on a pseudo-terminal (POSIX): it is their controlling
+// terminal, of the size asked for and then resized, input is typed into
+// it, ^C reaches the foreground, and the soft kill hangs up, even on an
+// interactive shell, which ignores TERM and takes a group of its own.
+static void testspawnpty(ProcTest *p, Arena scratch)
+{
+    Selftest *t  = p->t;
+    Os       *os = p->os;
+    if (p->te.windows) {
+        Spawn sp = {};
+        check(t, !os_spawnpty(os, &sp, 24, 80, scratch), "no os_spawnpty on Windows");
+        return;
+    }
+    Str sh = p->te.shell.path;
+
+    // A terminal of 24 by 80, then 30 by 100, typed into
+    Str script =
+        "test -t 0 && test -t 1 && test -t 2 && : </dev/tty && echo ctty-ok; "
+        "stty size; IFS= read -r line; echo \"got:[$line]\"; stty size";
+    Str argv[] = {sh, "-c", script};
+    Proc *pr = spawnpty(p, scratch, {argv, 3, 3}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh")) {
+        say(os, os_lasterr(os, &scratch));
+        return;
+    }
+    ProcWatch w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    check(t, ptysees(p, &w, "ctty-ok\r\n", 10000),
+          "the terminal is its input, output, errors and controlling terminal");
+    check(t, ptysees(p, &w, "24 80", 5000), "of the size asked for");
+    check(t, os_ptyresize(os, pr, 30, 100), "os_ptyresize");
+    check(t, os_procwrite(os, pr, "hello\r"), "typing into it");
+    check(t, ptysees(p, &w, "got:[hello]", 5000), "what is typed arrives as a line");
+    check(t, ptysees(p, &w, "30 100", 5000), "resized");
+    check(t, procwatch(os, p->mb, p->id, &w, 5000) && w.code==0, "it exits, and its output ends");
+    check(t, !os_ptyresize(os, pr, 0, 80), "os_ptyresize refuses no rows");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // ^C interrupts the foreground
+    script = "trap 'echo INT; exit 5' INT; echo ready; while :; do sleep 1; done";
+    argv[2] = script;
+    pr = spawnpty(p, scratch, {argv, 3, 3}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of a loop")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    check(t, ptysees(p, &w, "ready", 10000), "it starts");
+    os_procwrite(os, pr, "\x03");
+    check(t, procwatch(os, p->mb, p->id, &w, 5000) && w.code==5, "^C reaches it");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // The soft kill hangs up on what ignores TERM
+    script = "trap '' TERM; trap 'exit 7' HUP; echo ready; while :; do sleep 1; done";
+    argv[2] = script;
+    pr = spawnpty(p, scratch, {argv, 3, 3}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of a loop ignoring TERM")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    check(t, ptysees(p, &w, "ready", 10000), "it starts");
+    os_kill(os, pr, 0);
+    check(t, procwatch(os, p->mb, p->id, &w, 5000) && w.code==7, "the soft kill hangs up");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // An interactive shell: job control, typed commands, and the hangup
+    Str iargv[] = {sh, "-i"};
+    pr = spawnpty(p, scratch, {iargv, 2, 2}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh -i")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    // The terminal echoes the line typed, with its quotes, so only the
+    // output has the words joined
+    os_procwrite(os, pr, "[ \"$(ps -o pgid= -p $$ | tr -d ' ')\" = $$ ] && "
+                         "echo LEADS\"\"OK || echo LEADS\"\"NOT\r");
+    check(t, ptysees(p, &w, "LEADSOK", 10000),
+          "an interactive shell runs what is typed, leading a group of its own");
+    os_kill(os, pr, 0);
+    check(t, procwatch(os, p->mb, p->id, &w, 5000), "the soft kill ends an interactive shell");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // Job control: ^Z stops the foreground job and gives the shell the
+    // terminal back, so it runs the next line at once, before the job
+    // could have finished, and fg resumes the job, which then finishes
+    pr = spawnpty(p, scratch, {iargv, 2, 2}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh -i for job control")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    os_procwrite(os, pr, "echo RE\"\"ADY\r");
+    check(t, ptysees(p, &w, "READY", 10000), "the shell is ready");
+    os_procwrite(os, pr, "sh -c 'sleep 2; echo WO\"\"KE'\r");
+    procwatch(os, p->mb, p->id, &w, 500);  // until the job runs
+    os_procwrite(os, pr, "\x1a");
+    os_procwrite(os, pr, "echo STOP\"\"PED\r");
+    check(t, ptysees(p, &w, "STOPPED", 1500), "^Z stops the job, and the shell has the terminal");
+    os_procwrite(os, pr, "fg\r");
+    check(t, ptysees(p, &w, "WOKE", 10000), "fg resumes it");
+    {
+        Str got = finish(&w.keep);
+        check(t, find(got, "STOPPED") < find(got, "WOKE"), "it finished only after it was stopped");
+    }
+    os_procwrite(os, pr, "exit\r");
+    check(t, procwatch(os, p->mb, p->id, &w, 5000), "the shell exits");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // A line past macOS's 1024 bytes of a canonical line, typed as a
+    // paste is, all at once: the shell edits its own lines, raw, so all
+    // of it arrives. Only once it is ready: typed ahead, before it turns
+    // line editing on, the terminal's own (canonical) mode keeps 1024
+    // bytes of a line on macOS, and drops the rest, as in any terminal
+    pr = spawnpty(p, scratch, {iargv, 2, 2}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh -i for a long line")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    os_procwrite(os, pr, "echo RE\"\"ADY\r");
+    check(t, ptysees(p, &w, "READY", 10000), "the shell is ready");
+    {
+        Buf line(&scratch, 4096);
+        print(&line, "printf %s '");
+        for (i32 i = 0; i < 3000; i++) {
+            putbyte(&line, (u8)('a' + i%26));
+        }
+        print(&line, "' | wc -c | tr -d ' '; echo EN\"\"D\r");
+        check(t, os_procwrite(os, pr, finish(&line)), "typing a long line");
+    }
+    check(t, ptysees(p, &w, "END", 10000), "the long line runs");
+    check(t, find(finish(&w.keep), "\n3000\r\n") >= 0, "all 3000 bytes of it arrive");
+    os_kill(os, pr, 1);
+    os_procfree(os, pr);
+
+    // Freeing the Proc with no kill hangs up, as closing a terminal's
+    // window does, and an interactive shell ends
+    pr = spawnpty(p, scratch, {iargv, 2, 2}, 24, 80);
+    if (!check(t, pr!=0, "os_spawnpty of sh -i to free")) return;
+    w = {};
+    w.keep = Buf(&scratch, 1<<16);
+    os_procwrite(os, pr, "echo RE\"\"ADY\r");
+    check(t, ptysees(p, &w, "READY", 10000), "the shell is ready");
+    os_procfree(os, pr);
+    check(t, procwatch(os, p->mb, p->id, &w, 5000), "os_procfree alone ends the shell");
+    say(os, "spawnpty done");
+}
+
 // Real paths, and the guard on the real file system: a link inside the
 // workspace that leads out is caught. The shell makes the links: ln -s,
 // or on Windows junctions through cmd (symlinks need a privilege).
@@ -771,6 +940,7 @@ static void testprocs(Selftest *t, Arena *perm, Arena scratch, Str dir)
     testoverhead(p, scratch);
     testresponsible(p, scratch);
     testspawnio(p, scratch);
+    testspawnpty(p, scratch);
     testrealpaths(p, scratch);
     testtrees(p, scratch);
 }

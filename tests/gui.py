@@ -27,6 +27,7 @@ by quitting are gone, with no engine process left behind.
   uv run tests/gui.py --prospero build/prospero --mode launch [--shots DIR]
   uv run tests/gui.py --prospero build/prospero --mode firstrun [--shots DIR]
   uv run tests/gui.py --prospero build/prospero --mode changes [--shots DIR]
+  uv run tests/gui.py --prospero build/prospero --mode terminal [--shots DIR]
 
 The settings mode edits a value longer than a field's slack and picks
 the theme, dark then light, from its list over a transcript that shows
@@ -68,7 +69,11 @@ a file changed and one new: the session bar shows the branch, cut in
 its middle, and a click on it the Changes pane, which lists both, with
 no frames while idle; a file
 made while the window is away shows once it is back, and another
-click hides the pane. Without git it is skipped.
+click hides the pane. Without git it is skipped. The terminal mode
+shows the Terminal pane, types into its shell and reads the output,
+checks the size the shell is told before and after the window shrinks,
+interrupts a sleep with ^C, exits and restarts, then closes the session,
+which must end its terminal. It runs on macOS and Linux only.
 
 Every checklist starts as a first run, its state directory fresh: the
 window at its first size, and Help in front, then View → Layout → Standard. The
@@ -1504,7 +1509,7 @@ def main():
                     choices=["drive", "idle", "streamtest", "e2e", "signals",
                              "settings", "enginestop", "bench", "background", "remote",
                              "compose", "sessions", "plan", "launch", "firstrun",
-                             "mcp", "hosttask", "changes", "thin"])
+                             "mcp", "hosttask", "changes", "thin", "terminal"])
     ap.add_argument("--ssh", help="with --mode remote: the remote host, over real ssh "
                                   "(default: this machine, through a fake ssh)")
     ap.add_argument("--remote-prospero", help="with --ssh: the harness built there")
@@ -1528,6 +1533,8 @@ def main():
 
     if args.mode in ("hosttask", "thin") and (args.host or args.ssh):
         ap.error(f"--mode {args.mode} runs only here, through the fake ssh")
+    if args.mode == "terminal" and (args.host or sys.platform == "win32"):
+        ap.error("--mode terminal runs only here, on macOS or Linux")
     if args.mode == "changes" and args.host:
         ap.error("--mode changes runs only here, its repository made by git here")
     if args.mode == "changes" and not shutil.which("git"):
@@ -1767,7 +1774,7 @@ def main():
         else:
             print("mcp: signed in through the stand-in browser, the call sent its token")
     if args.mode in ("drive", "e2e", "settings", "enginestop", "sessions", "plan",
-                     "firstrun", "mcp", "hosttask", "changes", "thin"):
+                     "firstrun", "mcp", "hosttask", "changes", "thin", "terminal"):
         summary = [l for l in lines if "drive:" in l and " checks, " in l]
         if not summary:
             problems.append("no checklist summary")
@@ -1804,6 +1811,10 @@ def main():
                          "settings-narrowest"):
                 if not os.path.exists(os.path.join(args.shots, name + ".png")):
                     problems.append(f"no {name}.png")
+    if args.mode == "terminal" and args.shots:
+        for name in ("terminal", "terminal-exited"):
+            if not os.path.exists(os.path.join(args.shots, name + ".png")):
+                problems.append(f"no {name}.png")
     if args.mode == "changes" and args.shots:
         for name in ("changes-branch", "changes"):
             if not os.path.exists(os.path.join(args.shots, name + ".png")):

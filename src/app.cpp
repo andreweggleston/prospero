@@ -72,6 +72,7 @@
 #include "pathpick.cpp"
 #include "sidebar.cpp"
 #include "dock.cpp"
+#include "term.cpp"
 
 enum : i64 {
     STREAM_PERIOD = 1000000/30,  // µs between frames showing new deltas
@@ -1054,6 +1055,7 @@ struct Named {
 };
 
 struct DriveOp;
+struct GuiTerm;
 
 struct Gui {
     Os                *os;
@@ -1376,6 +1378,12 @@ struct Gui {
     Str                pathpre;    // [tools] path_prepend, as written
     Str                pathpost;   // [tools] path_append
     Mailbox           *edbox;      // its process's records
+    Mailbox           *termbox;    // the terminals' records (termpane.cpp)
+    GuiTerm           *ptys;       // the terminal pane's, each a session's, or closing
+    GuiTerm           *termspare;  // let go, for the next
+    u64                termid;     // the latest terminal's Spawn id
+    b32                termdirty;  // output the shown terminal has not shown
+    i64                lastterm;   // when it last showed
     GuiSession        *edsess;     // whose draft it edits, or null
     b32                edplan;     // its plan file instead (Edit plan)
     b32                edcfg;      // or the configuration file (Settings)
@@ -3906,6 +3914,8 @@ static b32 quitdone(Gui *g)
 // QUIT_GRACE regardless. Sessions on the other hosts run on.
 static void draftsendall(Gui *);
 static void editcancel(Gui *);
+static void termcloseall(Gui *);
+static void termsessclose(Gui *, GuiSession *);
 
 static void startquit(Gui *g)
 {
@@ -3916,6 +3926,7 @@ static void startquit(Gui *g)
     g->quitby   = os_ticks(g->os) + QUIT_GRACE;
     draftsendall(g);  // before the hosts are left
     editcancel(g);
+    termcloseall(g);
     closehosts(g);
     if (!g->enginegone && !g->host) {
         Arena a = newarena(g->cmdr);
@@ -7504,6 +7515,7 @@ static void sessgone(Gui *g, GuiSession *s)
 {
     s->gone   = 1;
     s->listed = 0;
+    termsessclose(g, s);
     imgdrop(g, s);
     attachclear(g, s);
     if (g->out.s == s) {
@@ -8847,8 +8859,10 @@ static void gui_close(Gui *);
 static void setzoom(Gui *, f32);
 static void zoomby(Gui *, i32);
 static void setpane(Gui *, i32, b32);
+static void drawterminal(Gui *);
 
 #include "ui.cpp"
+#include "termpane.cpp"
 
 
 // The fake agent
@@ -9355,6 +9369,7 @@ static void drainmail(Gui *g, i64 now)
     }
 
     other |= drainedit(g);
+    drainterm(g);
 
     // The other hosts': let go while closing, or in the background
     for (GuiHost *h = g->hosts, *next; h; h = next) {
@@ -9444,6 +9459,13 @@ static void drainmail(Gui *g, i64 now)
             scheddirty(s);
         } else {
             schedat(s, g->lastjobs+JOBS_PERIOD, DUE_STREAM);
+        }
+    }
+    if (g->termdirty) {
+        if (now-g->lastterm >= STREAM_PERIOD) {
+            scheddirty(s);
+        } else {
+            schedat(s, g->lastterm+STREAM_PERIOD, DUE_STREAM);
         }
     }
 }
@@ -10130,6 +10152,10 @@ static void gui_frame(Gui *g)
         g->jobsdirty = 0;  // this frame shows it
         g->lastjobs  = s->now;
     }
+    if (g->termdirty) {
+        g->termdirty = 0;
+        g->lastterm  = s->now;
+    }
     ImGuiIO &io = ImGui::GetIO();
     if (s->now-g->lastkey >= CARET_STOP) {
         io.ConfigInputTextCursorBlink = 0;
@@ -10188,6 +10214,9 @@ static void gui_frame(Gui *g)
     }
     if (g->quitat) {
         schedat(s, g->quitat, DUE_APP);
+    }
+    if (i64 hard = termtick(g, s->now)) {
+        schedat(s, hard, DUE_APP);  // a closing terminal's hard kill
     }
     if (g->quitting) {
         schedat(s, g->quitby, DUE_APP);
@@ -11121,6 +11150,10 @@ enum : i32 {
                       // nested under its original
     CHK_THIN,         // the remote r is up and thin, the Hosts pane saying so
     CHK_VIA,          // the session shown streams via this computer
+    CHK_TERMSAYS,     // the shown session's terminal shows text
+    CHK_TERMSIZE,     // and stty's size there, its rows and columns now
+    CHK_TERMTEXTIN,   // it has the focus, and the platform's text input on
+    CHK_TERMGONE,     // no terminal is left, not even one closing
     CHK_COUNT,
 };
 
@@ -11377,6 +11410,8 @@ static Str chknames[] = {
     "the session works in its worktree, on its branch",
     "the worktree session starts fresh, under its original",
     "the remote is thin", "its calls go via this computer",
+    "the terminal shows the text", "the terminal's program has its size",
+    "the terminal has the focus and text input", "no terminal is left",
 };
 static_assert(countof(chknames) == CHK_COUNT);
 
@@ -11451,6 +11486,8 @@ enum : i32 {
     W_WORKTREE,   // the session shown is on a branch starting with text
     W_THIN,       // the remote r is up and thin
     W_VIA,        // the session shown streams, relayed
+    W_TERMSAYS,   // the shown session's terminal shows text
+    W_TERMGONE,   // no terminal is left
 };
 
 static Str waitnames[] = {
@@ -11473,9 +11510,10 @@ static Str waitnames[] = {
     "the named remote's update", "the MCP server's state", "the MCP sign-in",
     "the subagent on far", "the subagent on far shown", "a toast",
     "the changes", "the folder's probe", "the worktree's branch",
-    "the thin remote", "a relayed stream",
+    "the thin remote", "a relayed stream", "the terminal's text",
+    "the terminals to end",
 };
-static_assert(countof(waitnames) == W_VIA+1);
+static_assert(countof(waitnames) == W_TERMGONE+1);
 
 enum : i32 {
     KEY_CTRL  = 1,
@@ -14642,6 +14680,80 @@ static DriveOp changesops[] = {
     {OP_QUIT, 0, 0, 0, 0, ""},
 };
 
+#define TERMTYPE(s) \
+    {OP_TEXT, 0, 0, 0, 50, s}, \
+    {OP_KEYDOWN, 0, GKEY_ENTER, 0, 50, ""}, \
+    {OP_KEYUP, 0, GKEY_ENTER, 0, 300, ""}
+
+// The terminal pane (tests/gui.py --mode terminal): shown from the View
+// menu, a shell in the session's folder, typed into with text input on,
+// its output shown; its size told to the program, again once the window
+// is smaller; ^C interrupting; an exit, and Restart; then the session
+// closed, and the terminal with it. The terminal echoes the lines typed,
+// so what is looked for is joined only in the output (TERM""OK).
+static DriveOp termops[] = {
+    {OP_WAIT, W_ENGINE, 0, 0, 10000, ""},
+    {OP_WAIT, W_CONFIG, 0, 0, 10000, ""},
+    {OP_MARK, 0, 0, 0, 1000, ""},
+    FIRSTRUN(0),
+    {OP_NEWSESSION, 0, 0, 0, 0, ""},
+    {OP_WAIT, W_SESSION, 0, 0, 10000, ""},
+    {OP_CHECK, CHK_SESSION, 0, 0, 0, ""},
+    SHOWPANE("Terminal"),
+    {OP_MOVE, T_NAMED, 0, 0, 100, "terminal"},
+    {OP_DOWN, 0, 0, 0, 60, ""},
+    {OP_UP, 0, 0, 0, 2000, ""},  // and the shell starts
+    {OP_CHECK, CHK_TERMTEXTIN, 0, 0, 0, ""},
+    TERMTYPE("echo TERM\"\"OK"),
+    {OP_WAIT, W_TERMSAYS, 0, 0, 10000, "TERMOK"},
+    {OP_CHECK, CHK_TERMSAYS, 0, 0, 0, "TERMOK"},
+    {OP_SHOT, 0, 0, 0, 300, "terminal"},
+    TERMTYPE("stty size"),
+    {OP_MOVE, T_EMPTY, 0, 0, 1000, ""},
+    {OP_CHECK, CHK_TERMSIZE, 0, 0, 0, ""},
+    {OP_RESIZE, 0, 900, 640, 1000, ""},
+    {OP_MOVE, T_NAMED, 0, 0, 100, "terminal"},
+    {OP_DOWN, 0, 0, 0, 60, ""},
+    {OP_UP, 0, 0, 0, 300, ""},
+    TERMTYPE("clear; stty size"),
+    {OP_MOVE, T_EMPTY, 0, 0, 1000, ""},
+    {OP_CHECK, CHK_TERMSIZE, 0, 0, 0, ""},
+    {OP_RESIZE, 0, 0, 0, 1000, ""},
+    {OP_MOVE, T_NAMED, 0, 0, 100, "terminal"},
+    {OP_DOWN, 0, 0, 0, 60, ""},
+    {OP_UP, 0, 0, 0, 300, ""},
+    // ^C reaches the foreground, which would sleep on otherwise
+    TERMTYPE("sleep 30"),
+    {OP_MOVE, T_NAMED, 0, 0, 500, "terminal"},
+    {OP_KEYDOWN, 0, GKEY_CTRL, KEY_CTRL, 50, ""},
+    {OP_KEYDOWN, 0, GKEY_C, KEY_CTRL, 50, ""},
+    {OP_KEYUP, 0, GKEY_C, KEY_CTRL, 50, ""},
+    {OP_KEYUP, 0, GKEY_CTRL, 0, 300, ""},
+    TERMTYPE("echo AFTER\"\"INT"),
+    {OP_WAIT, W_TERMSAYS, 0, 0, 5000, "AFTERINT"},
+    {OP_CHECK, CHK_TERMSAYS, 0, 0, 0, "AFTERINT"},
+    // An exit keeps the screen, saying so, and Restart starts another
+    TERMTYPE("exit"),
+    {OP_WAIT, W_TERMSAYS, 0, 0, 10000, "[process exited 0]"},
+    {OP_CHECK, CHK_TERMSAYS, 0, 0, 0, "[process exited 0]"},
+    {OP_SHOT, 0, 0, 0, 300, "terminal-exited"},
+    {OP_MOVE, T_NAMED, 0, 0, 100, "terminal restart"},
+    {OP_DOWN, 0, 0, 0, 60, ""},
+    {OP_UP, 0, 0, 0, 2000, ""},
+    {OP_MOVE, T_NAMED, 0, 0, 100, "terminal"},
+    {OP_DOWN, 0, 0, 0, 60, ""},
+    {OP_UP, 0, 0, 0, 300, ""},
+    TERMTYPE("echo AGA\"\"IN"),
+    {OP_WAIT, W_TERMSAYS, 0, 0, 10000, "AGAIN"},
+    {OP_CHECK, CHK_TERMSAYS, 0, 0, 0, "AGAIN"},
+    // Closing the session ends its terminal
+    {OP_CLOSEMAIN, 0, 0, 0, 300, ""},
+    {OP_WAIT, W_TERMGONE, 0, 0, 10000, ""},
+    {OP_CHECK, CHK_TERMGONE, 0, 0, 0, ""},
+    {OP_SUMMARY, 0, 0, 0, 0, ""},
+    {OP_QUIT, 0, 0, 0, 0, ""},
+};
+
 // prospero DIR (tests/gui.py --mode launch, which starts this window as
 // "prospero gui --launch DIR"): the session in DIR made after hello,
 // macOS's open event for the same DIR ignored, another launch's directory
@@ -15657,6 +15769,7 @@ static b32 docktreecheck(Gui *g)
         {PANE_LOG,        rtop},
         {PANE_PLAN,       right->ChildNodes[1]},
         {PANE_CHANGES,    right->ChildNodes[1]},
+        {PANE_TERMINAL,   rtop},
         {PANE_HELP,       rtop},
         {PANE_SETTINGS,   rtop},
         {PANE_HOSTS,      rtop},
@@ -15726,6 +15839,7 @@ static b32 compactcheck(Gui *g)
         {PANE_TODO,       left->ChildNodes[1]},
         {PANE_JOBS,       left->ChildNodes[1]},
         {PANE_LOG,        left->ChildNodes[1]},
+        {PANE_TERMINAL,   left->ChildNodes[1]},
         {PANE_TRANSCRIPT, top},
         {PANE_PLAN,       top},
         {PANE_CHANGES,    top},
@@ -16086,6 +16200,10 @@ static b32 drivewaitdone(Gui *g)
         GuiHost *h = findhost(g, GH_REMOTE, g->ops[g->drivepc-1].text);
         return h && h->up;
     }
+    case W_TERMSAYS:
+        return termsays(g, g->ops[g->drivepc-1].text);
+    case W_TERMGONE:
+        return !g->ptys;
     case W_FARKID: {
         GuiSession *k = drivekid(g, 0);
         return k && k->host->kind==GH_REMOTE && k->host->name=="far" && k->view->busy;
@@ -17853,6 +17971,28 @@ static b32 drivecheck(Gui *g, i32 chk)
         GuiHost *h = findhost(g, GH_REMOTE, "r");
         return h && h->up && h->thin && h->offered && g->offer.len && !g->offerempty;
     }
+    case CHK_TERMSAYS:
+        return termsays(g, g->ops[g->drivepc-1].text);
+    case CHK_TERMSIZE: {
+        GuiTerm *t = g->sess ? termfor(g, g->sess) : 0;
+        Arena    a = g->frame;
+        Buf      b(&a, 32);
+        if (t && t->term) {
+            print(&b, "\n");
+            print(&b, (i64)t->term->rows);
+            print(&b, " ");
+            print(&b, (i64)t->term->cols);
+            print(&b, "\n");
+            guilog(g, concat(&a, "drive: terminal: size", finish(&b)));
+        }
+        return t && t->term && termsays(g, finish(&b));
+    }
+    case CHK_TERMTEXTIN: {
+        GuiTerm *t = g->sess ? termfor(g, g->sess) : 0;
+        return t && t->focused && ImGui::GetIO().WantTextInput;
+    }
+    case CHK_TERMGONE:
+        return !g->ptys;
     case CHK_VIA:
         // The view names this computer, as the session bar shows it
         return g->sess && g->sess->host->kind==GH_REMOTE && g->machine.len &&
@@ -19314,6 +19454,7 @@ static i32 gui_main(Os *os, Arena mem, Str *args, i32 nargs)
     b32 subprocess = 0, fake = 0, e2e = 0, settings = 0, enginestop = 0;
     b32 background = 0, attach = 0, remote = 0, compose = 0, sidebar = 0, plan = 0;
     b32 launch = 0, first = 0, mcp = 0, hosttask = 0, changes = 0, thin = 0;
+    b32 terminal = 0;
     i64 history = 0;
     Str opendir = {};  // prospero DIR, as given
     i32 bench   = 0;
@@ -19358,6 +19499,8 @@ static i32 gui_main(Os *os, Arena mem, Str *args, i32 nargs)
             plan = probe = 1;
         } else if (a == "--changes") {
             changes = probe = 1;
+        } else if (a == "--terminal") {
+            terminal = probe = 1;
         } else if (a == "--mcp") {
             mcp = probe = 1;
         } else if (a == "--hosttask") {
@@ -19436,7 +19579,7 @@ static i32 gui_main(Os *os, Arena mem, Str *args, i32 nargs)
     g->enginekind = fake ? ENGINE_FAKE : subprocess ? ENGINE_SUBPROCESS : ENGINE_INPROC;
     if (drive || idle || streamtest || e2e || settings || enginestop ||
             background || attach || remote || compose || sidebar || plan || launch ||
-            first || mcp || hosttask || changes || thin) {
+            first || mcp || hosttask || changes || thin || terminal) {
         g->drive = 1;
         if (thin) {
             g->ops  = thinops;
@@ -19459,6 +19602,9 @@ static i32 gui_main(Os *os, Arena mem, Str *args, i32 nargs)
         } else if (changes) {
             g->ops  = changesops;
             g->nops = countof(changesops);
+        } else if (terminal) {
+            g->ops  = termops;
+            g->nops = countof(termops);
         } else if (compose) {
             g->ops  = compose==1 ? composeops : compose2ops;
             g->nops = compose==1 ? countof(composeops) : countof(compose2ops);
@@ -19528,6 +19674,7 @@ static i32 gui_main(Os *os, Arena mem, Str *args, i32 nargs)
                                  os_reserve(os, 16*mb), os_reserve(os, 16*mb));
     g->view       = g->nosession.view;
     g->edbox      = newmailbox(&g->perm, 1<<14, wakegui, os);
+    g->termbox    = newmailbox(&g->perm, 1<<18, wakegui, os);  // room for floods
     g->newcwd     = alloc<char>(&g->perm, FIELD_MAX);
     g->wtname     = alloc<char>(&g->perm, FIELD_MAX);
     g->namebuf    = alloc<char>(&g->perm, FIELD_MAX);
